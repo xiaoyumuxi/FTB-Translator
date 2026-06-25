@@ -33,6 +33,8 @@ Paste your DeepSeek API key in the GUI and save it. The key is stored in `.env` 
 DEEPSEEK_API_KEY=your_key_here
 ```
 
+You can copy `.env.example` to `.env` and replace the placeholder if you prefer editing the file directly.
+
 The app automatically chunks translation requests. There is no batch-size setting in the UI.
 During translation, the log panel shows DeepSeek calls, batch progress, backup creation, and overwrite targets.
 
