@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-from collections.abc import Callable
+import json
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from ftb_translater.backup import create_backup
@@ -15,6 +16,9 @@ from ftb_translater.snbt import load_lang_snbt, write_lang_snbt
 
 
 ProgressCallback = Callable[[str, int, int], None]
+LogCallback = Callable[[str], None]
+AUTO_BATCH_MAX_ENTRIES = 25
+AUTO_BATCH_MAX_CHARS = 6000
 
 
 def estimate_batches(total_entries: int, batch_size: int) -> int:
@@ -23,16 +27,43 @@ def estimate_batches(total_entries: int, batch_size: int) -> int:
     return (total_entries + batch_size - 1) // batch_size
 
 
+def build_translation_batches(
+    entries: Mapping[str, str],
+    batch_size: int | None = None,
+    max_chars: int = AUTO_BATCH_MAX_CHARS,
+) -> list[OrderedDict[str, str]]:
+    if batch_size is not None and batch_size <= 0:
+        raise ValueError("Batch size must be greater than zero.")
+    max_entries = batch_size or AUTO_BATCH_MAX_ENTRIES
+    batches: list[OrderedDict[str, str]] = []
+    current: OrderedDict[str, str] = OrderedDict()
+    current_chars = 0
+
+    for key, value in entries.items():
+        estimated_chars = len(json.dumps({key: value}, ensure_ascii=False))
+        if current and (len(current) >= max_entries or current_chars + estimated_chars > max_chars):
+            batches.append(current)
+            current = OrderedDict()
+            current_chars = 0
+        current[key] = value
+        current_chars += estimated_chars
+
+    if current:
+        batches.append(current)
+    return batches
+
+
 def translate_quests_lang(
     quests_dir: Path,
     api_key: str,
-    batch_size: int = 20,
+    batch_size: int | None = None,
     model: str = DEFAULT_MODEL,
     style: str = DEFAULT_STYLE,
     progress: ProgressCallback | None = None,
+    logger: LogCallback | None = None,
     translator: DeepSeekTranslator | None = None,
 ) -> TranslationReport:
-    if batch_size <= 0:
+    if batch_size is not None and batch_size <= 0:
         raise ValueError("Batch size must be greater than zero.")
 
     source_path = source_lang_path(quests_dir)
@@ -54,19 +85,22 @@ def translate_quests_lang(
         else:
             pending[key] = value
 
-    client = translator or DeepSeekTranslator(api_key=api_key, model=model)
+    client = translator or DeepSeekTranslator(api_key=api_key, model=model, logger=logger)
     total_pending = len(pending)
     completed_pending = 0
     failed_entries: list[str] = []
-    pending_items = list(pending.items())
+    batches = build_translation_batches(pending, batch_size=batch_size)
 
-    for start in range(0, total_pending, batch_size):
-        batch = OrderedDict(pending_items[start : start + batch_size])
+    for batch_index, batch in enumerate(batches, start=1):
         if progress:
             progress("translating", completed_pending, total_pending)
+        if logger:
+            logger(f"DeepSeek batch {batch_index}/{len(batches)}: {len(batch)} lang entries.")
         try:
             result = client.translate_batch(batch, style=style)
         except Exception as exc:  # noqa: BLE001 - report and preserve source text for failed entries.
+            if logger:
+                logger(f"Batch {batch_index} failed, preserving source text for this batch: {exc}")
             result = {}
             for key in batch:
                 failed_entries.append(f"{key}: {exc}")
@@ -86,7 +120,11 @@ def translate_quests_lang(
     for key in source_values:
         ordered_output[key] = translated_values[key]
 
+    if logger:
+        logger("Creating backup for lang directory before overwrite.")
     backup_dir = create_backup(quests_dir, directories=("lang",))
+    if logger:
+        logger(f"Overwriting target lang file: {target_path}")
     write_lang_snbt(target_path, ordered_output)
     parsed_target = load_lang_snbt(target_path)
     if list(parsed_target.keys()) != list(source_values.keys()):
@@ -112,13 +150,14 @@ def translate_quests_lang(
 def translate_quests_chapters(
     quests_dir: Path,
     api_key: str,
-    batch_size: int = 20,
+    batch_size: int | None = None,
     model: str = DEFAULT_MODEL,
     style: str = DEFAULT_STYLE,
     progress: ProgressCallback | None = None,
+    logger: LogCallback | None = None,
     translator: DeepSeekTranslator | None = None,
 ) -> TranslationReport:
-    if batch_size <= 0:
+    if batch_size is not None and batch_size <= 0:
         raise ValueError("Batch size must be greater than zero.")
 
     files = chapter_files(quests_dir)
@@ -130,7 +169,7 @@ def translate_quests_chapters(
     segments_by_file = {path: extract_chapter_segments(path) for path in files}
     all_segments = [segment for segments in segments_by_file.values() for segment in segments]
 
-    client = translator or DeepSeekTranslator(api_key=api_key, model=model)
+    client = translator or DeepSeekTranslator(api_key=api_key, model=model, logger=logger)
     pending: OrderedDict[str, str] = OrderedDict()
     translations_by_file: dict[Path, dict[int, str]] = {path: {} for path in files}
     cache_hits = 0
@@ -145,17 +184,20 @@ def translate_quests_chapters(
             pending[segment.cache_id] = segment.source_text
 
     segment_by_id = {segment.cache_id: segment for segment in all_segments}
-    pending_items = list(pending.items())
+    batches = build_translation_batches(pending, batch_size=batch_size)
     completed_pending = 0
     failed_entries: list[str] = []
 
-    for start in range(0, len(pending_items), batch_size):
-        batch = OrderedDict(pending_items[start : start + batch_size])
+    for batch_index, batch in enumerate(batches, start=1):
         if progress:
-            progress("translating", completed_pending, len(pending_items))
+            progress("translating", completed_pending, len(pending))
+        if logger:
+            logger(f"DeepSeek batch {batch_index}/{len(batches)}: {len(batch)} chapter text entries.")
         try:
             result = client.translate_batch(batch, style=style)
         except Exception as exc:  # noqa: BLE001 - report and preserve source text for failed entries.
+            if logger:
+                logger(f"Batch {batch_index} failed, preserving source text for this batch: {exc}")
             result = {}
             for key, value in batch.items():
                 failed_entries.append(f"{key}: {exc}")
@@ -172,9 +214,13 @@ def translate_quests_chapters(
                 warnings[cache_id] = token_warnings
         completed_pending += len(batch)
 
+    if logger:
+        logger("Creating backup for chapters directory before overwrite.")
     backup_dir = create_backup(quests_dir, directories=("chapters",))
     replaced_count = 0
     for path, replacements in translations_by_file.items():
+        if logger and replacements:
+            logger(f"Overwriting chapter file: {path} ({len(replacements)} text segments).")
         replaced_count += replace_chapter_segments(path, replacements)
 
     cache.save()
@@ -190,20 +236,21 @@ def translate_quests_chapters(
     )
     report.save(quests_dir)
     if progress:
-        progress("done", len(pending_items), len(pending_items))
+        progress("done", len(pending), len(pending))
     return report
 
 
 def translate_quests_auto(
     quests_dir: Path,
     api_key: str,
-    batch_size: int = 20,
+    batch_size: int | None = None,
     model: str = DEFAULT_MODEL,
     style: str = DEFAULT_STYLE,
     progress: ProgressCallback | None = None,
+    logger: LogCallback | None = None,
     translator: DeepSeekTranslator | None = None,
 ) -> TranslationReport:
     mode = detect_source_mode(quests_dir)
     if mode == "lang":
-        return translate_quests_lang(quests_dir, api_key, batch_size, model, style, progress, translator)
-    return translate_quests_chapters(quests_dir, api_key, batch_size, model, style, progress, translator)
+        return translate_quests_lang(quests_dir, api_key, batch_size, model, style, progress, logger, translator)
+    return translate_quests_chapters(quests_dir, api_key, batch_size, model, style, progress, logger, translator)

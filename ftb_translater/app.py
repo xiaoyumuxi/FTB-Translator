@@ -12,7 +12,7 @@ from ftb_translater.deepseek_client import DEFAULT_MODEL
 from ftb_translater.chapters import count_chapter_segments
 from ftb_translater.paths import detect_source_mode, resolve_quests_dir, source_lang_path
 from ftb_translater.snbt import load_lang_snbt
-from ftb_translater.translator import estimate_batches, translate_quests_auto
+from ftb_translater.translator import AUTO_BATCH_MAX_ENTRIES, estimate_batches, translate_quests_auto
 
 
 class FtbTranslaterApp(ctk.CTk):
@@ -24,8 +24,7 @@ class FtbTranslaterApp(ctk.CTk):
 
         self.selected_dir = ctk.StringVar()
         self.api_key = ctk.StringVar(value=load_api_key())
-        self.batch_size = ctk.IntVar(value=20)
-        self.status = ctk.StringVar(value="请选择整合包根目录或 config/ftbquests/quests。")
+        self.status = ctk.StringVar(value="请选择整合包目录，或它下面的 config/ftbquests/quests/lang/chapters 任一目录。")
         self.summary = ctk.StringVar(value="未扫描")
         self._quests_dir: Path | None = None
         self._queue: queue.Queue[tuple[str, object]] = queue.Queue()
@@ -43,7 +42,7 @@ class FtbTranslaterApp(ctk.CTk):
         title = ctk.CTkLabel(root, text="FTB Translater", font=ctk.CTkFont(size=24, weight="bold"))
         title.grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 18))
 
-        ctk.CTkLabel(root, text="任务书目录").grid(row=1, column=0, sticky="w", padx=(0, 10), pady=8)
+        ctk.CTkLabel(root, text="整合包目录").grid(row=1, column=0, sticky="w", padx=(0, 10), pady=8)
         ctk.CTkEntry(root, textvariable=self.selected_dir).grid(row=1, column=1, sticky="ew", pady=8)
         ctk.CTkButton(root, text="选择", width=88, command=self._choose_dir).grid(row=1, column=2, padx=(10, 0), pady=8)
 
@@ -51,30 +50,27 @@ class FtbTranslaterApp(ctk.CTk):
         ctk.CTkEntry(root, textvariable=self.api_key, show="*").grid(row=2, column=1, sticky="ew", pady=8)
         ctk.CTkButton(root, text="保存", width=88, command=self._save_key).grid(row=2, column=2, padx=(10, 0), pady=8)
 
-        ctk.CTkLabel(root, text="批大小").grid(row=3, column=0, sticky="w", padx=(0, 10), pady=8)
-        ctk.CTkEntry(root, textvariable=self.batch_size, width=120).grid(row=3, column=1, sticky="w", pady=8)
-
         info = ctk.CTkFrame(root)
-        info.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(18, 8))
+        info.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(18, 8))
         info.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(info, textvariable=self.summary, anchor="w", justify="left").grid(row=0, column=0, sticky="ew", padx=14, pady=14)
 
         actions = ctk.CTkFrame(root, fg_color="transparent")
-        actions.grid(row=5, column=0, columnspan=3, sticky="ew", pady=10)
+        actions.grid(row=4, column=0, columnspan=3, sticky="ew", pady=10)
         self.scan_button = ctk.CTkButton(actions, text="扫描", command=self._scan)
         self.scan_button.pack(side="left")
         self.translate_button = ctk.CTkButton(actions, text="开始汉化", command=self._start_translate, state="disabled")
         self.translate_button.pack(side="left", padx=10)
 
         self.progress = ctk.CTkProgressBar(root)
-        self.progress.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(18, 8))
+        self.progress.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(18, 8))
         self.progress.set(0)
 
         self.log = ctk.CTkTextbox(root, height=150)
-        self.log.grid(row=7, column=0, columnspan=3, sticky="nsew", pady=(10, 0))
-        root.grid_rowconfigure(7, weight=1)
+        self.log.grid(row=6, column=0, columnspan=3, sticky="nsew", pady=(10, 0))
+        root.grid_rowconfigure(6, weight=1)
 
-        ctk.CTkLabel(root, textvariable=self.status, anchor="w").grid(row=8, column=0, columnspan=3, sticky="ew", pady=(10, 0))
+        ctk.CTkLabel(root, textvariable=self.status, anchor="w").grid(row=7, column=0, columnspan=3, sticky="ew", pady=(10, 0))
 
     def _choose_dir(self) -> None:
         directory = filedialog.askdirectory()
@@ -99,7 +95,7 @@ class FtbTranslaterApp(ctk.CTk):
                 file_count, entry_count = count_chapter_segments(quests_dir)
                 source_label = f"{quests_dir / 'chapters'}（{file_count} 个章节文件）"
                 mode_label = "章节式 chapters/*.snbt"
-            batches = estimate_batches(entry_count, int(self.batch_size.get()))
+            batches = estimate_batches(entry_count, AUTO_BATCH_MAX_ENTRIES)
         except Exception as exc:  # noqa: BLE001 - show any validation problem in the GUI.
             self._quests_dir = None
             self.translate_button.configure(state="disabled")
@@ -114,7 +110,7 @@ class FtbTranslaterApp(ctk.CTk):
             f"任务书目录：{quests_dir}\n"
             f"模式：{mode_label}\n"
             f"源：{source_label}\n"
-            f"可翻译条目数：{entry_count}，预计批次：{batches}，模型：{DEFAULT_MODEL}"
+            f"可翻译条目数：{entry_count}，自动切块约 {batches} 批，模型：{DEFAULT_MODEL}"
         )
         self.status.set("扫描完成，可以开始汉化。")
         self._log("扫描完成。")
@@ -126,6 +122,14 @@ class FtbTranslaterApp(ctk.CTk):
             return
         if not self.api_key.get().strip():
             messagebox.showerror("缺少 API Key", "请填写 DeepSeek API Key。")
+            return
+        mode = detect_source_mode(self._quests_dir)
+        target = "lang/zh_cn.snbt" if mode == "lang" else "chapters/*.snbt"
+        if not messagebox.askyesno(
+            "确认覆盖写入",
+            f"将先创建备份，然后覆盖写入 {target}。\n\n任务书目录：{self._quests_dir}\n\n是否继续？",
+        ):
+            self._log("已取消：未执行覆盖写入。")
             return
         self._save_key()
         self.scan_button.configure(state="disabled")
@@ -141,12 +145,15 @@ class FtbTranslaterApp(ctk.CTk):
         def progress(stage: str, done: int, total: int) -> None:
             self._queue.put(("progress", (stage, done, total)))
 
+        def logger(message: str) -> None:
+            self._queue.put(("log", message))
+
         try:
             report = translate_quests_auto(
                 quests_dir=self._quests_dir,
                 api_key=self.api_key.get(),
-                batch_size=int(self.batch_size.get()),
                 progress=progress,
+                logger=logger,
             )
             self._queue.put(("done", report))
         except Exception as exc:  # noqa: BLE001
@@ -170,6 +177,8 @@ class FtbTranslaterApp(ctk.CTk):
                     self._log(f"缓存命中：{report.cache_hits}，失败：{len(report.failed_entries)}")
                     self.scan_button.configure(state="normal")
                     self.translate_button.configure(state="normal")
+                elif kind == "log":
+                    self._log(str(payload))
                 elif kind == "error":
                     exc = payload
                     self.status.set(str(exc))

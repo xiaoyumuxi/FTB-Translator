@@ -24,11 +24,17 @@ python -m pip install -e .
 python main.py
 ```
 
+Pick a modpack folder, its `config` folder, `config/ftbquests`, `config/ftbquests/quests`,
+or even the `lang` / `chapters` folder. The app will locate FTB Quests automatically.
+
 Paste your DeepSeek API key in the GUI and save it. The key is stored in `.env` as plain text:
 
 ```text
 DEEPSEEK_API_KEY=your_key_here
 ```
+
+The app automatically chunks translation requests. There is no batch-size setting in the UI.
+During translation, the log panel shows DeepSeek calls, batch progress, backup creation, and overwrite targets.
 
 ## Output
 
@@ -38,6 +44,9 @@ After translation, the tool writes:
 - `config/ftbquests/quests/.ftb-translater/cache.json`
 - `config/ftbquests/quests/.ftb-translater/report-latest.json`
 - `config/ftbquests/quests/.ftb-translater/backups/YYYYMMDD-HHMMSS/`
+
+Before writing, the app asks for confirmation and creates a backup. Lang mode overwrites `lang/zh_cn.snbt`;
+chapter mode rewrites matching text fields inside `chapters/*.snbt`.
 
 ## Tests
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
 
@@ -23,11 +23,13 @@ class DeepSeekTranslator:
         base_url: str = DEFAULT_BASE_URL,
         client: Any | None = None,
         retries: int = 2,
+        logger: Callable[[str], None] | None = None,
     ):
         if not api_key.strip() and client is None:
             raise ValueError("DeepSeek API Key is required.")
         self.model = model
         self.retries = retries
+        self.logger = logger
         self.client = client or self._create_client(api_key=api_key, base_url=base_url)
 
     def translate_batch(self, entries: Mapping[str, str], style: str = DEFAULT_STYLE) -> dict[str, str]:
@@ -37,9 +39,11 @@ class DeepSeekTranslator:
         last_error: Exception | None = None
         for attempt in range(self.retries + 1):
             try:
+                self._log(f"Calling DeepSeek {self.model}: {len(entries)} entries, attempt {attempt + 1}.")
                 return self._request_json(prompt, expected_keys=set(entries))
             except Exception as exc:  # noqa: BLE001 - surface the final API/JSON failure.
                 last_error = exc
+                self._log(f"DeepSeek batch attempt {attempt + 1} failed: {exc}")
                 if attempt < self.retries:
                     time.sleep(0.8 * (attempt + 1))
 
@@ -47,6 +51,7 @@ class DeepSeekTranslator:
         failures: list[str] = []
         for key, value in entries.items():
             try:
+                self._log(f"Retrying DeepSeek as single entry: {key}")
                 recovered[key] = self._request_json(
                     self._build_prompt({key: value}, style),
                     expected_keys={key},
@@ -114,3 +119,7 @@ class DeepSeekTranslator:
                 "Missing dependency 'openai'. Run `python -m pip install -e .` before using DeepSeek translation."
             ) from exc
         return OpenAI(api_key=api_key.strip(), base_url=base_url)
+
+    def _log(self, message: str) -> None:
+        if self.logger:
+            self.logger(message)

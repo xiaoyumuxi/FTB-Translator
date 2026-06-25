@@ -11,7 +11,7 @@ from ftb_translater.config import ENV_KEY, load_api_key, save_api_key
 from ftb_translater.format_guard import preserved_token_warnings
 from ftb_translater.paths import detect_source_mode, resolve_quests_dir
 from ftb_translater.snbt import dump_lang_snbt, parse_lang_snbt, write_lang_snbt
-from ftb_translater.translator import estimate_batches, translate_quests_auto, translate_quests_lang
+from ftb_translater.translator import build_translation_batches, estimate_batches, translate_quests_auto, translate_quests_lang
 
 
 class FakeTranslator:
@@ -39,7 +39,10 @@ class CoreTests(unittest.TestCase):
             write_lang_snbt(lang / "en_us.snbt", {"a": "A"})
 
             self.assertEqual(resolve_quests_dir(root), quests.resolve())
+            self.assertEqual(resolve_quests_dir(root / "config"), quests.resolve())
+            self.assertEqual(resolve_quests_dir(root / "config" / "ftbquests"), quests.resolve())
             self.assertEqual(resolve_quests_dir(quests), quests.resolve())
+            self.assertEqual(resolve_quests_dir(lang), quests.resolve())
             self.assertEqual(detect_source_mode(quests), "lang")
 
     def test_resolve_quests_dir_accepts_chapters_mode(self) -> None:
@@ -51,7 +54,18 @@ class CoreTests(unittest.TestCase):
 
             quests = chapters.parent
             self.assertEqual(resolve_quests_dir(root), quests.resolve())
+            self.assertEqual(resolve_quests_dir(chapters), quests.resolve())
             self.assertEqual(detect_source_mode(quests), "chapters")
+
+    def test_resolve_quests_dir_searches_nested_modpack(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            quests = root / "instances" / "Pack A" / "config" / "ftbquests" / "quests"
+            chapters = quests / "chapters"
+            chapters.mkdir(parents=True)
+            (chapters / "basics.snbt").write_text('title: "Getting Started"\n', encoding="utf-8")
+
+            self.assertEqual(resolve_quests_dir(root), quests.resolve())
 
     def test_env_save_and_load(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -154,6 +168,17 @@ class CoreTests(unittest.TestCase):
     def test_estimate_batches(self) -> None:
         self.assertEqual(estimate_batches(0, 20), 0)
         self.assertEqual(estimate_batches(21, 20), 2)
+
+    def test_auto_translation_batches_split_by_size(self) -> None:
+        batches = build_translation_batches(
+            {
+                "a": "short",
+                "b": "x" * 50,
+                "c": "y" * 50,
+            },
+            max_chars=70,
+        )
+        self.assertEqual(len(batches), 3)
 
 
 if __name__ == "__main__":
