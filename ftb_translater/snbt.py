@@ -4,8 +4,11 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import TypeAlias
 
+from ftb_translater.logger import get_logger
 
 LangMap: TypeAlias = "OrderedDict[str, str]"
+
+_log = get_logger(__name__)
 
 
 class SnbtParseError(ValueError):
@@ -113,10 +116,17 @@ def parse_lang_snbt(text: str) -> LangMap:
 
 
 def load_lang_snbt(path: Path) -> LangMap:
+    _log.debug("Loading lang SNBT: %s", path)
     try:
-        return parse_lang_snbt(path.read_text(encoding="utf-8-sig"))
+        result = parse_lang_snbt(path.read_text(encoding="utf-8-sig"))
+        _log.debug("Loaded %d entries from %s", len(result), path)
+        return result
     except OSError as exc:
+        _log.error("Could not read %s: %s", path, exc)
         raise SnbtParseError(f"Could not read {path}: {exc}") from exc
+    except SnbtParseError as exc:
+        _log.error("Parse error in %s: %s", path, exc)
+        raise
 
 
 def dump_lang_snbt(values: LangMap | dict[str, str]) -> str:
@@ -130,11 +140,14 @@ def dump_lang_snbt(values: LangMap | dict[str, str]) -> str:
 
 
 def write_lang_snbt(path: Path, values: LangMap | dict[str, str]) -> None:
+    _log.debug("Writing lang SNBT: %s (%d entries)", path, len(values))
     text = dump_lang_snbt(values)
     parsed = parse_lang_snbt(text)
     if list(parsed.keys()) != list(values.keys()):
+        _log.error("SNBT round-trip key mismatch when writing %s", path)
         raise SnbtParseError("Written SNBT key set did not validate.")
     path.write_text(text, encoding="utf-8")
+    _log.debug("Wrote %s OK", path)
 
 
 def _decode_escape(esc: str) -> str:

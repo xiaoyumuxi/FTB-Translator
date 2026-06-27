@@ -3,6 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from ftb_translater.logger import get_logger
+
+_log = get_logger(__name__)
 
 TRANSLATABLE_KEYS = frozenset({"title", "subtitle", "description", "text", "name"})
 
@@ -25,11 +28,15 @@ class ChapterTextSegment:
 def chapter_files(quests_dir: Path) -> list[Path]:
     chapters_dir = quests_dir / "chapters"
     if not chapters_dir.is_dir():
+        _log.debug("No chapters directory at %s", chapters_dir)
         return []
-    return sorted(chapters_dir.glob("*.snbt"))
+    files = sorted(chapters_dir.glob("*.snbt"))
+    _log.debug("Found %d chapter files in %s", len(files), chapters_dir)
+    return files
 
 
 def extract_chapter_segments(path: Path) -> list[ChapterTextSegment]:
+    _log.debug("Extracting segments from %s", path)
     text = path.read_text(encoding="utf-8-sig")
     segments: list[ChapterTextSegment] = []
     i = 0
@@ -66,10 +73,12 @@ def extract_chapter_segments(path: Path) -> list[ChapterTextSegment]:
             i = max(i, next_i)
             continue
         i += 1
+    _log.debug("Extracted %d translatable segments from %s", len(segments), path)
     return segments
 
 
 def replace_chapter_segments(path: Path, translations: dict[int, str]) -> int:
+    _log.debug("Replacing %d segments in %s", len(translations), path)
     text = path.read_text(encoding="utf-8-sig")
     segments = extract_chapter_segments(path)
     replacements = [segment for segment in segments if segment.index in translations]
@@ -77,12 +86,16 @@ def replace_chapter_segments(path: Path, translations: dict[int, str]) -> int:
         literal = _quote_string(translations[segment.index], segment.quote)
         text = text[: segment.start] + literal + text[segment.end :]
     path.write_text(text, encoding="utf-8")
+    _log.debug("Replaced %d segments in %s", len(replacements), path)
     return len(replacements)
 
 
 def count_chapter_segments(quests_dir: Path) -> tuple[int, int]:
     files = chapter_files(quests_dir)
-    return len(files), sum(len(extract_chapter_segments(path)) for path in files)
+    counts = {path: len(extract_chapter_segments(path)) for path in files}
+    total = sum(counts.values())
+    _log.debug("Chapter segments count: %d files, %d segments total", len(files), total)
+    return len(files), total
 
 
 def _extract_value_segments(

@@ -10,14 +10,19 @@ import customtkinter as ctk
 from ftb_translater.config import load_api_key, save_api_key
 from ftb_translater.deepseek_client import DEFAULT_MODEL
 from ftb_translater.chapters import count_chapter_segments
+from ftb_translater.logger import get_logger, setup_logging
 from ftb_translater.paths import detect_source_mode, resolve_quests_dir, source_lang_path
 from ftb_translater.snbt import load_lang_snbt
 from ftb_translater.translator import AUTO_BATCH_MAX_ENTRIES, estimate_batches, translate_quests_auto
+
+_log = get_logger(__name__)
 
 
 class FtbTranslaterApp(ctk.CTk):
     def __init__(self):
         super().__init__()
+        setup_logging()
+        _log.info("FTB Translater starting up")
         self.title("FTB Translater")
         self.geometry("760x520")
         self.minsize(720, 480)
@@ -76,14 +81,17 @@ class FtbTranslaterApp(ctk.CTk):
         directory = filedialog.askdirectory()
         if directory:
             self.selected_dir.set(directory)
+            _log.info("User selected directory: %s", directory)
             self._scan()
 
     def _save_key(self) -> None:
         save_api_key(self.api_key.get())
+        _log.info("Saved DEEPSEEK_API_KEY to .env")
         self._log("已保存 DEEPSEEK_API_KEY 到 .env。")
 
     def _scan(self) -> None:
         try:
+            _log.info("Starting scan for: %s", self.selected_dir.get())
             quests_dir = resolve_quests_dir(Path(self.selected_dir.get()))
             mode = detect_source_mode(quests_dir)
             if mode == "lang":
@@ -91,12 +99,15 @@ class FtbTranslaterApp(ctk.CTk):
                 entry_count = len(values)
                 source_label = str(source_lang_path(quests_dir))
                 mode_label = "新版 lang/en_us.snbt"
+                _log.info("Scan result: lang mode, %d entries from %s", entry_count, source_label)
             else:
                 file_count, entry_count = count_chapter_segments(quests_dir)
                 source_label = f"{quests_dir / 'chapters'}（{file_count} 个章节文件）"
                 mode_label = "章节式 chapters/*.snbt"
+                _log.info("Scan result: chapters mode, %d files, %d entries", file_count, entry_count)
             batches = estimate_batches(entry_count, AUTO_BATCH_MAX_ENTRIES)
-        except Exception as exc:  # noqa: BLE001 - show any validation problem in the GUI.
+        except Exception as exc:  # noqa: BLE001
+            _log.error("Scan failed: %s", exc, exc_info=True)
             self._quests_dir = None
             self.translate_button.configure(state="disabled")
             self.summary.set("扫描失败")
@@ -116,6 +127,7 @@ class FtbTranslaterApp(ctk.CTk):
         self._log("扫描完成。")
 
     def _start_translate(self) -> None:
+        _log.info("Translation requested by user")
         if self._quests_dir is None:
             self._scan()
         if self._quests_dir is None:
@@ -130,12 +142,14 @@ class FtbTranslaterApp(ctk.CTk):
             f"将先创建备份，然后覆盖写入 {target}。\n\n任务书目录：{self._quests_dir}\n\n是否继续？",
         ):
             self._log("已取消：未执行覆盖写入。")
+            _log.info("User cancelled the overwrite confirmation")
             return
         self._save_key()
         self.scan_button.configure(state="disabled")
         self.translate_button.configure(state="disabled")
         self.progress.set(0)
         self.status.set("正在汉化...")
+        _log.info("Starting translate worker thread (quests_dir=%s, mode=%s)", self._quests_dir, mode)
         thread = threading.Thread(target=self._translate_worker, daemon=True)
         thread.start()
 
@@ -149,14 +163,17 @@ class FtbTranslaterApp(ctk.CTk):
             self._queue.put(("log", message))
 
         try:
+            _log.info("Calling translate_quests_auto with quests_dir=%s", self._quests_dir)
             report = translate_quests_auto(
                 quests_dir=self._quests_dir,
                 api_key=self.api_key.get(),
                 progress=progress,
                 logger=logger,
             )
+            _log.info("Translation completed successfully: target=%s", report.target_file)
             self._queue.put(("done", report))
         except Exception as exc:  # noqa: BLE001
+            _log.error("Translation worker failed: %s", exc, exc_info=True)
             self._queue.put(("error", exc))
 
     def _drain_queue(self) -> None:
@@ -190,8 +207,10 @@ class FtbTranslaterApp(ctk.CTk):
         self.after(150, self._drain_queue)
 
     def _log(self, text: str) -> None:
+        """Log to both the GUI textbox and the file logger."""
         self.log.insert("end", text + "\n")
         self.log.see("end")
+        _log.info("[GUI] %s", text)
 
 
 def main() -> None:

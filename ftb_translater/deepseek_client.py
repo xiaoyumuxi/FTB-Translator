@@ -5,10 +5,13 @@ import time
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from ftb_translater.logger import get_logger
 
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-v4-flash"
 DEFAULT_STYLE = "自然玩家向简体中文汉化"
+
+_log = get_logger(__name__)
 
 
 class DeepSeekTranslationError(RuntimeError):
@@ -39,11 +42,15 @@ class DeepSeekTranslator:
         last_error: Exception | None = None
         for attempt in range(self.retries + 1):
             try:
-                self._log(f"Calling DeepSeek {self.model}: {len(entries)} entries, attempt {attempt + 1}.")
+                msg = f"Calling DeepSeek {self.model}: {len(entries)} entries, attempt {attempt + 1}."
+                _log.info(msg)
+                self._log(msg)
                 return self._request_json(prompt, expected_keys=set(entries))
-            except Exception as exc:  # noqa: BLE001 - surface the final API/JSON failure.
+            except Exception as exc:  # noqa: BLE001
                 last_error = exc
-                self._log(f"DeepSeek batch attempt {attempt + 1} failed: {exc}")
+                msg = f"DeepSeek batch attempt {attempt + 1} failed: {exc}"
+                _log.warning(msg)
+                self._log(msg)
                 if attempt < self.retries:
                     time.sleep(0.8 * (attempt + 1))
 
@@ -51,12 +58,15 @@ class DeepSeekTranslator:
         failures: list[str] = []
         for key, value in entries.items():
             try:
-                self._log(f"Retrying DeepSeek as single entry: {key}")
+                msg = f"Retrying DeepSeek as single entry: {key}"
+                _log.info(msg)
+                self._log(msg)
                 recovered[key] = self._request_json(
                     self._build_prompt({key: value}, style),
                     expected_keys={key},
                 )[key]
             except Exception as exc:  # noqa: BLE001
+                _log.error("Single-entry retry failed for key %r: %s", key, exc)
                 failures.append(f"{key}: {exc}")
         if failures:
             message = "; ".join(failures)
@@ -66,6 +76,7 @@ class DeepSeekTranslator:
         return recovered
 
     def _request_json(self, prompt: str, expected_keys: set[str]) -> dict[str, str]:
+        _log.debug("Sending request to DeepSeek, expected keys: %s", sorted(expected_keys))
         response = self.client.chat.completions.create(
             model=self.model,
             messages=[
@@ -84,18 +95,23 @@ class DeepSeekTranslator:
         content = response.choices[0].message.content
         if not content:
             raise DeepSeekTranslationError("DeepSeek returned an empty response.")
+        _log.debug("DeepSeek raw response length: %d chars", len(content))
         try:
             raw = json.loads(content)
         except json.JSONDecodeError as exc:
+            _log.error("DeepSeek returned invalid JSON: %s\nRaw content: %s", exc, content[:500])
             raise DeepSeekTranslationError(f"DeepSeek returned invalid JSON: {exc}") from exc
 
         if not isinstance(raw, dict):
+            _log.error("DeepSeek JSON response is not a dict, got %s: %s", type(raw).__name__, str(raw)[:200])
             raise DeepSeekTranslationError("DeepSeek JSON response must be an object.")
 
         missing = expected_keys - set(raw)
         if missing:
+            _log.error("DeepSeek response missed keys: %s. Got keys: %s", sorted(missing), sorted(raw.keys()))
             raise DeepSeekTranslationError(f"DeepSeek response missed keys: {sorted(missing)}")
 
+        _log.debug("DeepSeek response OK: %d keys returned", len(expected_keys))
         return {key: str(raw[key]) for key in expected_keys}
 
     @staticmethod
@@ -118,6 +134,7 @@ class DeepSeekTranslator:
             raise DeepSeekTranslationError(
                 "Missing dependency 'openai'. Run `python -m pip install -e .` before using DeepSeek translation."
             ) from exc
+        _log.debug("Creating OpenAI client with base_url=%s", base_url)
         return OpenAI(api_key=api_key.strip(), base_url=base_url)
 
     def _log(self, message: str) -> None:

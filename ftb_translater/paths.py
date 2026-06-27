@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from ftb_translater.logger import get_logger
+
+_log = get_logger(__name__)
 
 MAX_SEARCH_DEPTH = 5
 
@@ -17,9 +20,17 @@ def has_chapters_source(quests_dir: Path) -> bool:
 
 def resolve_quests_dir(selected_dir: Path) -> Path:
     selected_dir = selected_dir.expanduser().resolve()
-    for candidate in _candidate_quests_dirs(selected_dir):
-        if has_lang_source(candidate) or has_chapters_source(candidate):
+    _log.debug("resolve_quests_dir: starting from %s", selected_dir)
+    candidates = _candidate_quests_dirs(selected_dir)
+    _log.debug("Trying %d candidate directories", len(candidates))
+    for candidate in candidates:
+        if has_lang_source(candidate):
+            _log.info("Found lang source at: %s", candidate)
             return candidate
+        if has_chapters_source(candidate):
+            _log.info("Found chapters source at: %s", candidate)
+            return candidate
+    _log.error("No FTB quests directory found under %s. Tried: %s", selected_dir, candidates)
     raise FileNotFoundError(
         "Could not find FTB Quests lang/en_us.snbt or chapters/*.snbt. "
         "Select a modpack root, config folder, ftbquests folder, quests folder, lang folder, or chapters folder."
@@ -28,9 +39,12 @@ def resolve_quests_dir(selected_dir: Path) -> Path:
 
 def detect_source_mode(quests_dir: Path) -> str:
     if has_lang_source(quests_dir):
+        _log.debug("Source mode: lang (%s)", quests_dir)
         return "lang"
     if has_chapters_source(quests_dir):
+        _log.debug("Source mode: chapters (%s)", quests_dir)
         return "chapters"
+    _log.error("detect_source_mode: no lang or chapters source found at %s", quests_dir)
     raise FileNotFoundError("Could not find lang/en_us.snbt or chapters/*.snbt.")
 
 

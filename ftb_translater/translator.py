@@ -10,9 +10,12 @@ from ftb_translater.cache import TranslationCache
 from ftb_translater.chapters import chapter_files, extract_chapter_segments, replace_chapter_segments
 from ftb_translater.deepseek_client import DEFAULT_MODEL, DEFAULT_STYLE, DeepSeekTranslator
 from ftb_translater.format_guard import preserved_token_warnings
+from ftb_translater.logger import get_logger
 from ftb_translater.paths import detect_source_mode, source_lang_path, target_lang_path
 from ftb_translater.report import TranslationReport
 from ftb_translater.snbt import load_lang_snbt, write_lang_snbt
+
+_log = get_logger(__name__)
 
 
 ProgressCallback = Callable[[str, int, int], None]
@@ -68,7 +71,11 @@ def translate_quests_lang(
 
     source_path = source_lang_path(quests_dir)
     target_path = target_lang_path(quests_dir)
+    _log.info("translate_quests_lang: quests_dir=%s source=%s", quests_dir, source_path)
+
     source_values = load_lang_snbt(source_path)
+    _log.debug("Loaded source lang: %d entries", len(source_values))
+
     cache = TranslationCache(quests_dir / ".ftb-translater" / "cache.json")
     cache.load()
 
@@ -85,22 +92,29 @@ def translate_quests_lang(
         else:
             pending[key] = value
 
+    _log.info("Cache hits: %d, pending translation: %d", cache_hits, len(pending))
+
     client = translator or DeepSeekTranslator(api_key=api_key, model=model, logger=logger)
     total_pending = len(pending)
     completed_pending = 0
     failed_entries: list[str] = []
     batches = build_translation_batches(pending, batch_size=batch_size)
+    _log.info("Built %d batches for %d pending entries", len(batches), total_pending)
 
     for batch_index, batch in enumerate(batches, start=1):
         if progress:
             progress("translating", completed_pending, total_pending)
+        msg = f"DeepSeek batch {batch_index}/{len(batches)}: {len(batch)} lang entries."
+        _log.info(msg)
         if logger:
-            logger(f"DeepSeek batch {batch_index}/{len(batches)}: {len(batch)} lang entries.")
+            logger(msg)
         try:
             result = client.translate_batch(batch, style=style)
-        except Exception as exc:  # noqa: BLE001 - report and preserve source text for failed entries.
+        except Exception as exc:  # noqa: BLE001
+            msg = f"Batch {batch_index} failed, preserving source text for this batch: {exc}"
+            _log.error(msg)
             if logger:
-                logger(f"Batch {batch_index} failed, preserving source text for this batch: {exc}")
+                logger(msg)
             result = {}
             for key in batch:
                 failed_entries.append(f"{key}: {exc}")
@@ -113,6 +127,7 @@ def translate_quests_lang(
                 cache.set(source_text, model, "zh_cn", style, translated_text)
             token_warnings = preserved_token_warnings(source_text, translated_text)
             if token_warnings:
+                _log.warning("Format token mismatch for key %r: %s", key, token_warnings)
                 warnings[key] = token_warnings
         completed_pending += len(batch)
 
@@ -120,17 +135,36 @@ def translate_quests_lang(
     for key in source_values:
         ordered_output[key] = translated_values[key]
 
+    msg = "Creating backup for lang directory before overwrite."
+    _log.info(msg)
     if logger:
-        logger("Creating backup for lang directory before overwrite.")
+        logger(msg)
     backup_dir = create_backup(quests_dir, directories=("lang",))
+    _log.info("Backup created at: %s", backup_dir)
+
+    msg = f"Overwriting target lang file: {target_path}"
+    _log.info(msg)
     if logger:
-        logger(f"Overwriting target lang file: {target_path}")
+        logger(msg)
     write_lang_snbt(target_path, ordered_output)
+
     parsed_target = load_lang_snbt(target_path)
     if list(parsed_target.keys()) != list(source_values.keys()):
+        _log.error(
+            "Key mismatch after write! source keys=%d written keys=%d",
+            len(source_values), len(parsed_target),
+        )
         raise ValueError("Written zh_cn.snbt does not contain the same keys as en_us.snbt.")
 
     cache.save()
+    _log.info(
+        "Lang translation done: total=%d translated=%d cache_hits=%d failed=%d warnings=%d",
+        len(source_values), len(source_values) - len(failed_entries),
+        cache_hits, len(failed_entries), len(warnings),
+    )
+    if failed_entries:
+        _log.warning("Failed entries:\n%s", "\n".join(failed_entries))
+
     report = TranslationReport(
         source_file=str(source_path),
         target_file=str(target_path),
@@ -162,12 +196,16 @@ def translate_quests_chapters(
 
     files = chapter_files(quests_dir)
     if not files:
+        _log.error("No chapter SNBT files found under %s", quests_dir / "chapters")
         raise FileNotFoundError(f"No chapter SNBT files found under {quests_dir / 'chapters'}")
+
+    _log.info("translate_quests_chapters: quests_dir=%s, files=%d", quests_dir, len(files))
 
     cache = TranslationCache(quests_dir / ".ftb-translater" / "cache.json")
     cache.load()
     segments_by_file = {path: extract_chapter_segments(path) for path in files}
     all_segments = [segment for segments in segments_by_file.values() for segment in segments]
+    _log.debug("Extracted %d total text segments from %d chapter files", len(all_segments), len(files))
 
     client = translator or DeepSeekTranslator(api_key=api_key, model=model, logger=logger)
     pending: OrderedDict[str, str] = OrderedDict()
@@ -183,21 +221,28 @@ def translate_quests_chapters(
         else:
             pending[segment.cache_id] = segment.source_text
 
+    _log.info("Cache hits: %d, pending translation: %d", cache_hits, len(pending))
+
     segment_by_id = {segment.cache_id: segment for segment in all_segments}
     batches = build_translation_batches(pending, batch_size=batch_size)
+    _log.info("Built %d batches for %d pending segments", len(batches), len(pending))
     completed_pending = 0
     failed_entries: list[str] = []
 
     for batch_index, batch in enumerate(batches, start=1):
         if progress:
             progress("translating", completed_pending, len(pending))
+        msg = f"DeepSeek batch {batch_index}/{len(batches)}: {len(batch)} chapter text entries."
+        _log.info(msg)
         if logger:
-            logger(f"DeepSeek batch {batch_index}/{len(batches)}: {len(batch)} chapter text entries.")
+            logger(msg)
         try:
             result = client.translate_batch(batch, style=style)
-        except Exception as exc:  # noqa: BLE001 - report and preserve source text for failed entries.
+        except Exception as exc:  # noqa: BLE001
+            msg = f"Batch {batch_index} failed, preserving source text for this batch: {exc}"
+            _log.error(msg)
             if logger:
-                logger(f"Batch {batch_index} failed, preserving source text for this batch: {exc}")
+                logger(msg)
             result = {}
             for key, value in batch.items():
                 failed_entries.append(f"{key}: {exc}")
@@ -211,19 +256,34 @@ def translate_quests_chapters(
                 cache.set(source_text, model, "zh_cn", style, translated_text)
             token_warnings = preserved_token_warnings(source_text, translated_text)
             if token_warnings:
+                _log.warning("Format token mismatch for segment %r: %s", cache_id, token_warnings)
                 warnings[cache_id] = token_warnings
         completed_pending += len(batch)
 
+    msg = "Creating backup for chapters directory before overwrite."
+    _log.info(msg)
     if logger:
-        logger("Creating backup for chapters directory before overwrite.")
+        logger(msg)
     backup_dir = create_backup(quests_dir, directories=("chapters",))
+    _log.info("Backup created at: %s", backup_dir)
+
     replaced_count = 0
     for path, replacements in translations_by_file.items():
-        if logger and replacements:
-            logger(f"Overwriting chapter file: {path} ({len(replacements)} text segments).")
+        if replacements:
+            msg = f"Overwriting chapter file: {path} ({len(replacements)} text segments)."
+            _log.info(msg)
+            if logger:
+                logger(msg)
         replaced_count += replace_chapter_segments(path, replacements)
 
     cache.save()
+    _log.info(
+        "Chapters translation done: total=%d replaced=%d cache_hits=%d failed=%d warnings=%d",
+        len(all_segments), replaced_count, cache_hits, len(failed_entries), len(warnings),
+    )
+    if failed_entries:
+        _log.warning("Failed entries:\n%s", "\n".join(failed_entries))
+
     report = TranslationReport(
         source_file=str(quests_dir / "chapters"),
         target_file=str(quests_dir / "chapters"),
@@ -251,6 +311,7 @@ def translate_quests_auto(
     translator: DeepSeekTranslator | None = None,
 ) -> TranslationReport:
     mode = detect_source_mode(quests_dir)
+    _log.info("translate_quests_auto: mode=%s quests_dir=%s", mode, quests_dir)
     if mode == "lang":
         return translate_quests_lang(quests_dir, api_key, batch_size, model, style, progress, logger, translator)
     return translate_quests_chapters(quests_dir, api_key, batch_size, model, style, progress, logger, translator)
