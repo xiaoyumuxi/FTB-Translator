@@ -6,7 +6,8 @@ from typing import TypeAlias
 
 from ftb_translater.logger import get_logger
 
-LangMap: TypeAlias = "OrderedDict[str, str]"
+LangValue: TypeAlias = "str | list[str]"
+LangMap: TypeAlias = "OrderedDict[str, LangValue]"
 
 _log = get_logger(__name__)
 
@@ -33,7 +34,7 @@ class _Parser:
             self._skip_ws_and_comments()
             self._expect(":")
             self._skip_ws_and_comments()
-            value = self._parse_string()
+            value = self._parse_value()
             values[key] = value
             self._skip_ws_and_comments()
             if self._peek() == ",":
@@ -41,11 +42,20 @@ class _Parser:
                 continue
             if self._peek() == "}":
                 continue
-            raise self._error("Expected ',' or '}'")
+            if self._peek():
+                continue
+            raise self._error("Expected key or '}'")
         self._skip_ws_and_comments()
         if self.index != len(self.text):
             raise self._error("Unexpected trailing content")
         return values
+
+    def _parse_value(self) -> LangValue:
+        if self._peek() in {'"', "'"}:
+            return self._parse_string()
+        if self._peek() == "[":
+            return self._parse_string_list()
+        raise self._error("Expected quoted string or string list value")
 
     def _parse_key(self) -> str:
         if self._peek() in {'"', "'"}:
@@ -78,6 +88,25 @@ class _Parser:
             else:
                 chars.append(char)
         raise self._error("Unterminated string")
+
+    def _parse_string_list(self) -> list[str]:
+        self._expect("[")
+        values: list[str] = []
+        while True:
+            self._skip_ws_and_comments()
+            if self._peek() == "]":
+                self.index += 1
+                return values
+            values.append(self._parse_string())
+            self._skip_ws_and_comments()
+            if self._peek() == ",":
+                self.index += 1
+                continue
+            if self._peek() == "]":
+                continue
+            if self._peek():
+                continue
+            raise self._error("Expected string or ']'")
 
     def _skip_ws_and_comments(self) -> None:
         while self.index < len(self.text):
@@ -129,17 +158,24 @@ def load_lang_snbt(path: Path) -> LangMap:
         raise
 
 
-def dump_lang_snbt(values: LangMap | dict[str, str]) -> str:
+def dump_lang_snbt(values: LangMap | dict[str, LangValue]) -> str:
     lines = ["{"]
     items = list(values.items())
     for index, (key, value) in enumerate(items):
         suffix = "," if index < len(items) - 1 else ""
-        lines.append(f'  "{_escape(key)}": "{_escape(value)}"{suffix}')
+        if isinstance(value, list):
+            lines.append(f'  "{_escape(key)}": [')
+            for item_index, item in enumerate(value):
+                item_suffix = "," if item_index < len(value) - 1 else ""
+                lines.append(f'    "{_escape(item)}"{item_suffix}')
+            lines.append(f"  ]{suffix}")
+        else:
+            lines.append(f'  "{_escape(key)}": "{_escape(value)}"{suffix}')
     lines.append("}")
     return "\n".join(lines) + "\n"
 
 
-def write_lang_snbt(path: Path, values: LangMap | dict[str, str]) -> None:
+def write_lang_snbt(path: Path, values: LangMap | dict[str, LangValue]) -> None:
     _log.debug("Writing lang SNBT: %s (%d entries)", path, len(values))
     text = dump_lang_snbt(values)
     parsed = parse_lang_snbt(text)

@@ -30,6 +30,18 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(parsed["ftbquests.chapter.one"], 'Hello "world"\nLine')
         self.assertEqual(parse_lang_snbt(dump_lang_snbt(parsed)), parsed)
 
+    def test_parse_lang_snbt_accepts_newline_separated_entries(self) -> None:
+        source = '{\n  "first": "One"\n  second: "Two"\n}\n'
+
+        self.assertEqual(parse_lang_snbt(source), {"first": "One", "second": "Two"})
+
+    def test_parse_and_dump_lang_snbt_accepts_string_lists(self) -> None:
+        source = '{\n  quest_desc: [\n    "First line"\n    ""\n    "Third line"\n  ]\n}\n'
+        parsed = parse_lang_snbt(source)
+
+        self.assertEqual(parsed["quest_desc"], ["First line", "", "Third line"])
+        self.assertEqual(parse_lang_snbt(dump_lang_snbt(parsed)), parsed)
+
     def test_resolve_quests_dir_accepts_root_or_quests_dir(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

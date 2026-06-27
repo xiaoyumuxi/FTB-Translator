@@ -55,3 +55,34 @@ chapter mode rewrites matching text fields inside `chapters/*.snbt`.
 ```powershell
 python -m unittest discover -s tests -v
 ```
+
+Optional live CurseForge download test:
+
+```powershell
+$env:FTB_TRANSLATER_LIVE_TEST=1
+python -m unittest tests.test_live_curseforge -v
+```
+
+By default this downloads a CurseForge modpack zip, extracts it into a temporary directory,
+locates `config/ftbquests/quests`, and runs translation with a fake translator so DeepSeek is
+not called. Override the source URL when needed; a direct CurseForge/ForgeCDN `.zip` URL is the
+most reliable form for scripted tests:
+
+```powershell
+$env:FTB_TRANSLATER_CURSEFORGE_URL="https://edge.forgecdn.net/files/1234/567/your-pack.zip"
+$env:FTB_TRANSLATER_LIVE_MAX_MB=500
+```
+
+Optional paid end-to-end test with the real DeepSeek API:
+
+```powershell
+$env:FTB_TRANSLATER_LIVE_DEEPSEEK=1
+python -m unittest tests.test_live_deepseek_e2e -v
+```
+
+This also downloads and extracts a real CurseForge pack, then samples a small number of real
+`en_us.snbt` entries before calling DeepSeek and writing outputs. Adjust the sample size with:
+
+```powershell
+$env:FTB_TRANSLATER_LIVE_DEEPSEEK_ENTRIES=20
+```

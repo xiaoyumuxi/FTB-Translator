@@ -13,7 +13,7 @@ from ftb_translater.format_guard import preserved_token_warnings
 from ftb_translater.logger import get_logger
 from ftb_translater.paths import detect_source_mode, source_lang_path, target_lang_path
 from ftb_translater.report import TranslationReport
-from ftb_translater.snbt import load_lang_snbt, write_lang_snbt
+from ftb_translater.snbt import LangValue, load_lang_snbt, write_lang_snbt
 
 _log = get_logger(__name__)
 
@@ -79,18 +79,19 @@ def translate_quests_lang(
     cache = TranslationCache(quests_dir / ".ftb-translater" / "cache.json")
     cache.load()
 
-    translated_values: OrderedDict[str, str] = OrderedDict()
+    translated_values: OrderedDict[str, LangValue] = OrderedDict()
     pending: OrderedDict[str, str] = OrderedDict()
     cache_hits = 0
     warnings: dict[str, list[str]] = {}
 
     for key, value in source_values.items():
-        cached = cache.get(value, model, "zh_cn", style)
+        source_text = _lang_value_to_text(value)
+        cached = cache.get(source_text, model, "zh_cn", style)
         if cached is not None:
-            translated_values[key] = cached
+            translated_values[key] = _text_to_lang_value(cached, value)
             cache_hits += 1
         else:
-            pending[key] = value
+            pending[key] = source_text
 
     _log.info("Cache hits: %d, pending translation: %d", cache_hits, len(pending))
 
@@ -122,7 +123,7 @@ def translate_quests_lang(
 
         for key, source_text in batch.items():
             translated_text = result.get(key, source_text)
-            translated_values[key] = translated_text
+            translated_values[key] = _text_to_lang_value(translated_text, source_values[key])
             if translated_text != source_text:
                 cache.set(source_text, model, "zh_cn", style, translated_text)
             token_warnings = preserved_token_warnings(source_text, translated_text)
@@ -131,7 +132,7 @@ def translate_quests_lang(
                 warnings[key] = token_warnings
         completed_pending += len(batch)
 
-    ordered_output: OrderedDict[str, str] = OrderedDict()
+    ordered_output: OrderedDict[str, LangValue] = OrderedDict()
     for key in source_values:
         ordered_output[key] = translated_values[key]
 
@@ -315,3 +316,15 @@ def translate_quests_auto(
     if mode == "lang":
         return translate_quests_lang(quests_dir, api_key, batch_size, model, style, progress, logger, translator)
     return translate_quests_chapters(quests_dir, api_key, batch_size, model, style, progress, logger, translator)
+
+
+def _lang_value_to_text(value: LangValue) -> str:
+    if isinstance(value, list):
+        return "\n".join(value)
+    return value
+
+
+def _text_to_lang_value(text: str, template: LangValue) -> LangValue:
+    if isinstance(template, list):
+        return text.split("\n")
+    return text
