@@ -1,96 +1,118 @@
 # FTB Translater
 
-FTB Translater is a small desktop tool for translating modern FTB Quests language files with DeepSeek.
+FTB Translater 是一个用于汉化现代 FTB Quests 任务文本的小型桌面工具，翻译接口使用 DeepSeek。
 
-## v1 Scope
+## 功能范围
 
-- Supports `en_us -> zh_cn` only.
-- Supports modern FTB Quests lang files: `config/ftbquests/quests/lang/en_us.snbt`.
-- Supports chapter-style FTB Quests files: `config/ftbquests/quests/chapters/*.snbt`.
-- Writes `lang/zh_cn.snbt` in place for lang mode.
-- Rewrites translatable text fields in `chapters/*.snbt` in place for chapter mode.
-- Backs up the existing `lang` or `chapters` directory before writing.
-- Stores translation cache and reports under `.ftb-translater/` inside the selected quests directory.
+- 目前只支持 `en_us -> zh_cn`。
+- 支持新版 FTB Quests 语言文件：`config/ftbquests/quests/lang/en_us.snbt`。
+- 支持章节式 FTB Quests 文件：`config/ftbquests/quests/chapters/*.snbt`。
+- `lang` 模式会写入或覆盖 `lang/zh_cn.snbt`。
+- `chapters` 模式会原地改写 `chapters/*.snbt` 中可翻译的文本字段。
+- 写入前会自动备份已有的 `lang` 或 `chapters` 目录。
+- 翻译缓存、报告和备份会保存在任务目录下的 `.ftb-translater/`。
 
-## Install
+## 安装
 
 ```powershell
 python -m pip install -e .
 ```
 
-## Run
+## 运行
 
 ```powershell
 python main.py
 ```
 
-Pick a modpack folder, its `config` folder, `config/ftbquests`, `config/ftbquests/quests`,
-or even the `lang` / `chapters` folder. The app will locate FTB Quests automatically.
+选择整合包目录即可，也可以选择它下面的 `config`、`config/ftbquests`、
+`config/ftbquests/quests`，甚至直接选择 `lang` 或 `chapters` 目录。程序会自动定位
+FTB Quests 任务目录。
 
-Paste your DeepSeek API key in the GUI and save it. The key is stored in `.env` as plain text:
+在界面里填写并保存 DeepSeek API Key。Key 会以明文保存到项目根目录的 `.env`：
 
 ```text
 DEEPSEEK_API_KEY=your_key_here
 ```
 
-You can copy `.env.example` to `.env` and replace the placeholder if you prefer editing the file directly.
+也可以复制 `.env.example` 为 `.env`，然后手动填写 Key。
 
-The app automatically chunks translation requests. There is no batch-size setting in the UI.
-During translation, the log panel shows DeepSeek calls, batch progress, backup creation, and overwrite targets.
-DeepSeek batches run concurrently by default. Override the worker count when needed:
+## 翻译策略
+
+程序会自动切分翻译请求，并根据当前任务规模选择一个保守的 DeepSeek 并发数。界面里不需要手动设置批大小。
+翻译时，日志区域会显示 DeepSeek 调用、批次进度、备份创建和覆盖写入目标。
+
+如需手动指定并发数：
 
 ```powershell
 $env:FTB_TRANSLATER_CONCURRENCY=6
 ```
 
-Translations that drop protected formatting tokens such as `&e`, `%s`, `<item:...>`, or literal
-escape sequences such as `\n` are discarded for that entry and the original source text is preserved.
+如需恢复自动调节，可以取消该环境变量，或设置为：
 
-## Output
+```powershell
+$env:FTB_TRANSLATER_CONCURRENCY=auto
+```
 
-After translation, the tool writes:
+如果 DeepSeek 返回的译文丢失受保护的格式内容，该条译文会被丢弃，并保留原文。当前保护内容包括：
 
-- `config/ftbquests/quests/lang/zh_cn.snbt` in lang mode, or translated `chapters/*.snbt` in chapter mode
+- FTB / Minecraft 格式码，例如 `&e`、`&r`、`§a`
+- 占位符，例如 `%s`、`%1$s`
+- 物品或标签 token，例如 `<item:minecraft:stone>`、`#forge:ingots/iron`
+- 字面转义序列，例如 `\n`、`\t`
+- 实际换行和制表符数量
+
+## 输出文件
+
+翻译完成后会写入：
+
+- `config/ftbquests/quests/lang/zh_cn.snbt`，或改写 `chapters/*.snbt`
 - `config/ftbquests/quests/.ftb-translater/cache.json`
 - `config/ftbquests/quests/.ftb-translater/report-latest.json`
 - `config/ftbquests/quests/.ftb-translater/backups/YYYYMMDD-HHMMSS/`
 
-Before writing, the app asks for confirmation and creates a backup. Lang mode overwrites `lang/zh_cn.snbt`;
-chapter mode rewrites matching text fields inside `chapters/*.snbt`.
+写入前程序会弹窗确认，并先创建备份。`lang` 模式会覆盖 `lang/zh_cn.snbt`；
+`chapters` 模式会改写章节文件里的匹配文本字段。
 
-## Tests
+## 测试
 
-```powershell
-python -m unittest discover -s tests -v
-```
-
-Optional live CurseForge download test:
+普通测试组：
 
 ```powershell
-$env:FTB_TRANSLATER_LIVE_TEST=1
-python -m unittest tests.test_live_curseforge -v
+python -m tests.run_groups unit
 ```
 
-By default this downloads a CurseForge modpack zip, extracts it into a temporary directory,
-locates `config/ftbquests/quests`, and runs translation with a fake translator so DeepSeek is
-not called. Override the source URL when needed; a direct CurseForge/ForgeCDN `.zip` URL is the
-most reliable form for scripted tests:
+完整流程测试组：
+
+```powershell
+python -m tests.run_groups e2e
+```
+
+完整流程测试组会自动启用真实 live 测试开关。它会下载真实 CurseForge 整合包 zip，解压到临时目录，
+定位 `config/ftbquests/quests`，先用假翻译器跑一遍真实下载处理流程，再抽样调用真实 DeepSeek API
+跑一遍付费端到端流程。真实 DeepSeek 测试的最终文件会保存在：
+
+```text
+.ftb-translater/e2e-runs/YYYYMMDD-HHMMSS/
+```
+
+其中 `summary.txt` 会列出 `zh_cn.snbt`、`report-latest.json`、`cache.json` 和备份目录的完整路径。
+
+如需指定测试用整合包，建议使用 CurseForge / ForgeCDN 的直接 `.zip` 链接：
 
 ```powershell
 $env:FTB_TRANSLATER_CURSEFORGE_URL="https://edge.forgecdn.net/files/1234/567/your-pack.zip"
 $env:FTB_TRANSLATER_LIVE_MAX_MB=500
 ```
 
-Optional paid end-to-end test with the real DeepSeek API:
-
-```powershell
-$env:FTB_TRANSLATER_LIVE_DEEPSEEK=1
-python -m unittest tests.test_live_deepseek_e2e -v
-```
-
-This also downloads and extracts a real CurseForge pack, then samples a small number of real
-`en_us.snbt` entries before calling DeepSeek and writing outputs. Adjust the sample size with:
+调整真实 DeepSeek 测试的抽样条目数：
 
 ```powershell
 $env:FTB_TRANSLATER_LIVE_DEEPSEEK_ENTRIES=20
+```
+
+安装为可执行脚本后，也可以使用：
+
+```powershell
+ftb-test
+ftb-test-e2e
 ```

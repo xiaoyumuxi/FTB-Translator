@@ -13,7 +13,13 @@ from ftb_translater.config import ENV_KEY, load_api_key, save_api_key
 from ftb_translater.format_guard import preserved_token_warnings
 from ftb_translater.paths import detect_source_mode, resolve_quests_dir
 from ftb_translater.snbt import dump_lang_snbt, parse_lang_snbt, write_lang_snbt
-from ftb_translater.translator import build_translation_batches, estimate_batches, translate_quests_auto, translate_quests_lang
+from ftb_translater.translator import (
+    _resolve_max_workers,
+    build_translation_batches,
+    estimate_batches,
+    translate_quests_auto,
+    translate_quests_lang,
+)
 
 
 class FakeTranslator:
@@ -265,6 +271,16 @@ class CoreTests(unittest.TestCase):
             max_chars=70,
         )
         self.assertEqual(len(batches), 3)
+
+    def test_auto_concurrency_scales_with_task_size(self) -> None:
+        self.assertEqual(_resolve_max_workers(None, batch_count=1, entry_count=10), 1)
+        self.assertEqual(_resolve_max_workers(None, batch_count=4, entry_count=20), 2)
+        self.assertEqual(_resolve_max_workers(None, batch_count=8, entry_count=100), 3)
+        self.assertEqual(_resolve_max_workers(None, batch_count=20, entry_count=500), 4)
+        self.assertEqual(_resolve_max_workers(None, batch_count=80, entry_count=2500), 6)
+
+    def test_explicit_concurrency_overrides_auto(self) -> None:
+        self.assertEqual(_resolve_max_workers(3, batch_count=80, entry_count=2500), 3)
 
 
 if __name__ == "__main__":

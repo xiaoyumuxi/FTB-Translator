@@ -10,3 +10,5 @@ dependencies = [
 
 [project.scripts]
 ftb-translater = "ftb_translater.app:main"
+ftb-test = "tests.run_groups:main"
+ftb-test-e2e = "tests.run_groups:main"

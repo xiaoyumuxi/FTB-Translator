@@ -21,6 +21,7 @@ from tests.test_live_curseforge import (
 
 LIVE_DEEPSEEK_ENV = "FTB_TRANSLATER_LIVE_DEEPSEEK"
 LIVE_DEEPSEEK_ENTRIES_ENV = "FTB_TRANSLATER_LIVE_DEEPSEEK_ENTRIES"
+LIVE_OUTPUT_DIR_ENV = "FTB_TRANSLATER_LIVE_OUTPUT_DIR"
 DEFAULT_LIVE_DEEPSEEK_ENTRIES = 12
 
 
@@ -37,8 +38,8 @@ class LiveDeepSeekEndToEndTests(unittest.TestCase):
         url = os.getenv(CURSEFORGE_URL_ENV, DEFAULT_CURSEFORGE_URL)
         sample_size = _sample_size()
 
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+        root, cleanup = _working_root()
+        try:
             archive = root / "curseforge-pack.zip"
             extract_dir = root / "extracted"
 
@@ -65,6 +66,39 @@ class LiveDeepSeekEndToEndTests(unittest.TestCase):
             self.assertTrue((quests_dir / ".ftb-translater" / "cache.json").exists())
             self.assertTrue((quests_dir / ".ftb-translater" / "report-latest.json").exists())
             self.assertTrue(_has_changed_text(sampled_values, translated_values))
+            _write_summary(root, quests_dir, report)
+        finally:
+            if cleanup is not None:
+                cleanup.cleanup()
+
+
+def _working_root() -> tuple[Path, tempfile.TemporaryDirectory[str] | None]:
+    output_dir = os.getenv(LIVE_OUTPUT_DIR_ENV)
+    if output_dir:
+        root = Path(output_dir)
+        root.mkdir(parents=True, exist_ok=True)
+        return root, None
+    cleanup = tempfile.TemporaryDirectory()
+    return Path(cleanup.name), cleanup
+
+
+def _write_summary(root: Path, quests_dir: Path, report) -> None:
+    summary = "\n".join(
+        [
+            f"run_dir={root.resolve()}",
+            f"quests_dir={quests_dir.resolve()}",
+            f"target={target_lang_path(quests_dir).resolve()}",
+            f"report={quests_dir / '.ftb-translater' / 'report-latest.json'}",
+            f"cache={quests_dir / '.ftb-translater' / 'cache.json'}",
+            f"backup={report.backup_dir}",
+            f"total_entries={report.total_entries}",
+            f"translated_entries={report.translated_entries}",
+            f"cache_hits={report.cache_hits}",
+            f"failed_entries={len(report.failed_entries)}",
+            f"warnings={len(report.warnings)}",
+        ]
+    )
+    (root / "summary.txt").write_text(summary + "\n", encoding="utf-8")
 
 
 def _sample_size() -> int:

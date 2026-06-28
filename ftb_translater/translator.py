@@ -26,7 +26,7 @@ ProgressCallback = Callable[[str, int, int], None]
 LogCallback = Callable[[str], None]
 AUTO_BATCH_MAX_ENTRIES = 25
 AUTO_BATCH_MAX_CHARS = 6000
-DEFAULT_MAX_WORKERS = 4
+AUTO_MAX_WORKERS = 6
 MAX_WORKERS_ENV = "FTB_TRANSLATER_CONCURRENCY"
 
 
@@ -343,7 +343,7 @@ def _translate_batches(
     translator: DeepSeekTranslator | None,
     max_workers: int | None,
 ) -> list[_BatchResult]:
-    worker_count = _resolve_max_workers(max_workers, len(batches))
+    worker_count = _resolve_max_workers(max_workers, len(batches), progress_total)
     if not batches:
         if progress:
             progress("done", 0, progress_total)
@@ -438,23 +438,37 @@ def _translate_one_batch(
         return _BatchResult(batch_index=batch_index, batch=batch, result=dict(batch), error=exc)
 
 
-def _resolve_max_workers(max_workers: int | None, batch_count: int) -> int:
+def _resolve_max_workers(max_workers: int | None, batch_count: int, entry_count: int = 0) -> int:
     if batch_count <= 0:
         return 1
     value = max_workers
     if value is None:
         raw_value = os.getenv(MAX_WORKERS_ENV)
         if raw_value:
+            if raw_value.strip().lower() == "auto":
+                return _auto_max_workers(batch_count, entry_count)
             try:
                 value = int(raw_value)
             except ValueError:
-                _log.warning("%s must be an integer, falling back to %d", MAX_WORKERS_ENV, DEFAULT_MAX_WORKERS)
-                value = DEFAULT_MAX_WORKERS
+                _log.warning("%s must be an integer or 'auto', falling back to automatic concurrency", MAX_WORKERS_ENV)
+                return _auto_max_workers(batch_count, entry_count)
         else:
-            value = DEFAULT_MAX_WORKERS
+            return _auto_max_workers(batch_count, entry_count)
     if value <= 0:
         raise ValueError("max_workers must be greater than zero.")
     return min(value, batch_count)
+
+
+def _auto_max_workers(batch_count: int, entry_count: int) -> int:
+    if batch_count <= 1:
+        return 1
+    if entry_count <= 25:
+        return min(2, batch_count)
+    if entry_count <= 150:
+        return min(3, batch_count)
+    if entry_count <= 800:
+        return min(4, batch_count)
+    return min(AUTO_MAX_WORKERS, batch_count)
 
 
 def _guard_translation(source_text: str, translated_text: str) -> tuple[str, list[str]]:
