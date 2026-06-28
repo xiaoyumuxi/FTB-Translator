@@ -143,8 +143,8 @@ dist/FTB-Translater.exe
 
 仓库也提供了 GitHub Actions 跨平台打包流水线：`.github/workflows/build.yml`。
 
-- push 到 `main` / `master` 或发起 PR 时，会在 Windows、macOS、Linux 上运行单元测试并打包。
+- push 到 `main` / `master` 或发起 PR 时，会在 Windows、macOS 上运行单元测试并打包。
 - Windows 产物：`FTB-Translater-windows.exe`
 - macOS 产物：`FTB-Translater-macos.dmg`
-- Linux 产物：`FTB-Translater-linux`
-- 推送 `v*` 格式的 tag，例如 `v0.1.0`，会自动把三端产物上传到 GitHub Release。
+- 推送 `v*` 格式的 tag，例如 `v0.1.0`，会自动把双平台产物作为裸文件上传到 GitHub Release。
+- 普通 Actions artifact 下载会被 GitHub 自动包装成 zip，所以流水线不上传 workflow artifact，只发布 Release 附件。
