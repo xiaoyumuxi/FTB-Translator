@@ -14,7 +14,6 @@ from ftb_translater.config import (
     ENV_KEY,
     MODEL_KEY,
     STYLE_KEY,
-    env_path,
     load_api_key,
     load_config_values,
     save_config_values,
@@ -50,7 +49,7 @@ class FtbTranslaterApp(ctk.CTk):
         self.summary = ctk.StringVar(value="未扫描")
         self.stage = ctk.StringVar(value="准备就绪")
         self.progress_text = ctk.StringVar(value="等待扫描")
-        self.settings_status = ctk.StringVar(value=f"{ENV_KEY} 保存到：{env_path()}")
+        self.settings_status = ctk.StringVar(value="API Key 会通过此界面保存和读取。")
         self._quests_dir: Path | None = None
         self._queue: queue.Queue[tuple[str, object]] = queue.Queue()
         self._key_visible = False
@@ -265,7 +264,7 @@ class FtbTranslaterApp(ctk.CTk):
         content.grid(row=1, column=0, sticky="nsew")
         content.grid_columnconfigure(0, weight=1)
 
-        api_panel = self._panel(content, "DeepSeek API Key", f"用于调用 DeepSeek 翻译接口，保存字段为 {ENV_KEY}。")
+        api_panel = self._panel(content, "DeepSeek API Key", "用于调用 DeepSeek 翻译接口，保存后下次启动会自动读取。")
         api_panel.grid(row=0, column=0, sticky="ew", pady=(0, 12))
         api_panel.grid_columnconfigure(0, weight=1)
         self.key_entry = ctk.CTkEntry(api_panel, textvariable=self.api_key, show="*", height=40)
@@ -333,17 +332,6 @@ class FtbTranslaterApp(ctk.CTk):
             text_color=("#687386", "#AAB3C2"),
         ).grid(row=6, column=0, columnspan=2, sticky="ew", padx=18, pady=(0, 18))
 
-        storage_panel = self._panel(content, "文件位置", "这些路径用于排查配置、缓存、报告和备份。")
-        storage_panel.grid(row=3, column=0, sticky="ew", pady=(0, 12))
-        storage_panel.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(
-            storage_panel,
-            text=f"配置文件：{env_path()}\n翻译缓存、报告和备份：所选任务目录下的 .ftb-translater/",
-            anchor="w",
-            justify="left",
-            wraplength=660,
-        ).grid(row=2, column=0, sticky="ew", padx=18, pady=(0, 18))
-
     def _panel(self, parent: ctk.CTkFrame, title: str, description: str) -> ctk.CTkFrame:
         panel = ctk.CTkFrame(parent, corner_radius=14, border_width=1, border_color=("#D8DEE8", "#262B33"))
         ctk.CTkLabel(panel, text=title, anchor="w", font=ctk.CTkFont(size=16, weight="bold")).grid(
@@ -383,7 +371,7 @@ class FtbTranslaterApp(ctk.CTk):
     def _reset_service_settings(self) -> None:
         self.base_url.set(DEFAULT_BASE_URL)
         self.model.set(DEFAULT_MODEL)
-        self.settings_status.set("已恢复默认 DeepSeek 服务参数，点击保存全部后写入配置文件。")
+        self.settings_status.set("已恢复默认 DeepSeek 服务参数，点击保存全部后生效。")
 
     def _current_style(self) -> str:
         text = self.style_text.get("1.0", "end").strip()
@@ -427,9 +415,9 @@ class FtbTranslaterApp(ctk.CTk):
                 CONCURRENCY_KEY: self.max_workers.get() or "auto",
             }
         )
-        self.settings_status.set(f"已保存全部设置到：{env_path()}")
-        _log.info("Saved app settings to .env")
-        self._log("已保存全部设置到 .env。")
+        self.settings_status.set("已保存全部设置。")
+        _log.info("Saved app settings")
+        self._log("已保存全部设置。")
 
     def _set_stage(self, stage: str) -> None:
         labels = {
@@ -523,7 +511,7 @@ class FtbTranslaterApp(ctk.CTk):
             return
         if not self.api_key.get().strip():
             self._show_view("settings")
-            self.settings_status.set(f"请先填写 {ENV_KEY}，然后点击保存。配置文件：{env_path()}")
+            self.settings_status.set("请先填写 API Key，然后点击保存全部。")
             messagebox.showerror("缺少 API Key", "请填写 DeepSeek API Key。")
             return
         mode = detect_source_mode(self._quests_dir)

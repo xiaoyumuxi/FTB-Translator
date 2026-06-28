@@ -4,6 +4,8 @@ import logging
 import logging.handlers
 from pathlib import Path
 
+from ftb_translater.user_paths import user_config_dir
+
 
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
@@ -50,5 +52,5 @@ def get_logger(name: str) -> logging.Logger:
 
 
 def _get_log_path(log_dir: Path | None) -> Path:
-    base = log_dir or Path.cwd() / ".ftb-translater" / "logs"
+    base = log_dir or user_config_dir() / "logs"
     return base / "ftb_translater.log"

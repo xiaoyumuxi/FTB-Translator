@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from ftb_translater.cache import TranslationCache
 from ftb_translater.chapters import count_chapter_segments, extract_chapter_segments
@@ -16,6 +18,7 @@ from ftb_translater.config import (
     ENV_KEY,
     MODEL_KEY,
     STYLE_KEY,
+    env_path,
     load_config_values,
     load_api_key,
     save_config_values,
@@ -131,6 +134,36 @@ class CoreTests(unittest.TestCase):
             save_api_key("sk-test", root)
             self.assertEqual((root / ".env").read_text(encoding="utf-8").strip(), f"{ENV_KEY}=sk-test")
             self.assertEqual(load_api_key(root), "sk-test")
+
+    def test_default_env_path_uses_config_dir_override(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with patch.dict("os.environ", {"FTB_TRANSLATER_CONFIG_DIR": str(root)}):
+                self.assertEqual(env_path(), root / ".env")
+
+    def test_default_load_does_not_read_cwd_env_or_api_key_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            app_config = root / "app-config"
+            cwd = root / "cwd"
+            app_config.mkdir()
+            cwd.mkdir()
+            (cwd / ".env").write_text(f"{ENV_KEY}=sk-from-cwd\n", encoding="utf-8")
+
+            previous_cwd = Path.cwd()
+            try:
+                os.chdir(cwd)
+                with patch.dict(
+                    "os.environ",
+                    {
+                        "FTB_TRANSLATER_CONFIG_DIR": str(app_config),
+                        ENV_KEY: "sk-from-env",
+                    },
+                ):
+                    self.assertEqual(load_api_key(), "")
+                    self.assertEqual(load_config_values()[ENV_KEY], "")
+            finally:
+                os.chdir(previous_cwd)
 
     def test_save_and_load_app_config_values_preserves_unrelated_env(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

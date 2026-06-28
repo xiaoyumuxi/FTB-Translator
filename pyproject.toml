@@ -1,6 +1,6 @@
 [project]
 name = "ftb-translater"
-version = "0.1.0"
+version = "0.1.1"
 requires-python = ">=3.11"
 dependencies = [
     "customtkinter>=5.2.2",
@@ -12,3 +12,8 @@ dependencies = [
 ftb-translater = "ftb_translater.app:main"
 ftb-test = "tests.run_groups:main"
 ftb-test-e2e = "tests.run_groups:main"
+
+[dependency-groups]
+dev = [
+    "pyinstaller>=6.21.0",
+]

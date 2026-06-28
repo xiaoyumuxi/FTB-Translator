@@ -3,12 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from ftb_translater.logger import get_logger
+from ftb_translater.user_paths import user_config_dir
 
 try:
-    from dotenv import dotenv_values, load_dotenv
+    from dotenv import dotenv_values
 except ImportError:  # pragma: no cover - dependency is declared, fallback keeps imports readable.
     dotenv_values = None
-    load_dotenv = None
 
 
 _log = get_logger(__name__)
@@ -31,7 +31,9 @@ APP_CONFIG_KEYS = (
 
 
 def env_path(base_dir: Path | None = None) -> Path:
-    return (base_dir or Path.cwd()) / ".env"
+    if base_dir is not None:
+        return base_dir / ".env"
+    return user_config_dir() / ".env"
 
 
 def load_api_key(base_dir: Path | None = None) -> str:
@@ -45,18 +47,10 @@ def load_api_key(base_dir: Path | None = None) -> str:
     if path.exists():
         value = _read_env_file(path).get(ENV_KEY)
         if value:
-            _log.debug("API key loaded from raw .env file")
+            _log.debug("API key loaded from raw app settings file")
             return value
-    if load_dotenv is not None:
-        load_dotenv(path)
-    import os
-
-    key = os.getenv(ENV_KEY, "")
-    if key:
-        _log.debug("API key loaded from environment variable")
-    else:
-        _log.warning("No DEEPSEEK_API_KEY found in .env or environment variables")
-    return key
+    _log.warning("No API key found in saved app settings")
+    return ""
 
 
 def load_config_values(base_dir: Path | None = None) -> dict[str, str]:
@@ -67,11 +61,9 @@ def load_config_values(base_dir: Path | None = None) -> dict[str, str]:
     elif path.exists():
         values.update(_read_env_file(path))
 
-    import os
-
     for key in APP_CONFIG_KEYS:
         if not values.get(key):
-            values[key] = os.getenv(key, "")
+            values[key] = ""
     return values
 
 

@@ -6,3 +6,6 @@ __pycache__/
 .pytest_cache/
 .ftb-translater/
 *.egg-info/
+build/
+dist/
+*.spec

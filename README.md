@@ -28,13 +28,7 @@ python main.py
 `config/ftbquests/quests`，甚至直接选择 `lang` 或 `chapters` 目录。程序会自动定位
 FTB Quests 任务目录。
 
-在界面左侧进入“设置”，填写并保存 DeepSeek API Key。Key 会以明文保存到项目根目录的 `.env`：
-
-```text
-DEEPSEEK_API_KEY=your_key_here
-```
-
-也可以复制 `.env.example` 为 `.env`，然后手动填写 Key。
+在界面左侧进入“设置”，填写并保存 DeepSeek API Key。后续启动会自动读取已保存的设置，不需要手动创建或编辑配置文件。
 
 设置面板还可以配置：
 
@@ -130,9 +124,8 @@ ftb-test-e2e
 本地打包 Windows 版本：
 
 ```powershell
-python -m pip install -e .
-python -m pip install pyinstaller
-python -m PyInstaller --noconfirm --clean --onefile --windowed --name FTB-Translater --collect-data customtkinter main.py
+uv sync --dev
+uv run python -m PyInstaller --noconfirm --clean --onefile --windowed --name FTB-Translater --collect-data customtkinter main.py
 ```
 
 输出文件：
