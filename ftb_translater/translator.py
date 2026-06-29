@@ -13,7 +13,7 @@ from ftb_translater.backup import create_backup
 from ftb_translater.cache import TranslationCache
 from ftb_translater.chapters import chapter_files, extract_chapter_segments, replace_chapter_segments
 from ftb_translater.deepseek_client import DEFAULT_BASE_URL, DEFAULT_MODEL, DEFAULT_STYLE, DeepSeekTranslator
-from ftb_translater.format_guard import preserved_token_warnings
+from ftb_translater.format_guard import preserved_token_warnings, protect_text, restore_text
 from ftb_translater.logger import get_logger
 from ftb_translater.paths import detect_source_mode, source_lang_path, target_lang_path
 from ftb_translater.report import TranslationReport
@@ -499,10 +499,17 @@ def _auto_max_workers(batch_count: int, entry_count: int) -> int:
 
 
 def _guard_translation(source_text: str, translated_text: str) -> tuple[str, list[str]]:
-    token_warnings = preserved_token_warnings(source_text, translated_text)
+    # Step 1: protect source (extract tokens, replace with placeholders)
+    protected, protections = protect_text(source_text)
+
+    # Step 2: restore tokens in the translated output
+    restored = restore_text(translated_text, protections)
+
+    # Step 3: run the token-preservation check
+    token_warnings = preserved_token_warnings(source_text, restored)
     if token_warnings:
         return source_text, [*token_warnings, "Unsafe translation discarded; source text preserved."]
-    return translated_text, []
+    return restored, []
 
 
 def _lang_value_to_text(value: LangValue) -> str:
