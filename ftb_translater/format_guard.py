@@ -27,8 +27,19 @@ _ANGLE_PATTERN = re.compile(r"<[^<>\n]+>")
 _BRACE_MACRO_PATTERN = re.compile(r"\{[@A-Za-z][^{}\n]*\}")
 
 # Resource identifiers / file paths that can appear outside brace macros.
+#
+# Keep this intentionally narrow.  A broad "word/word" matcher treats normal
+# player-facing text such as "and/or", "input/output", "RF/t", and "Up/Down"
+# as hard format tokens, which causes safe translations to be discarded.  Real
+# resource paths usually have a namespace, a known asset/config prefix, or a
+# filename extension.
 _RESOURCE_PATH_PATTERN = re.compile(
-    r"\b(?:[a-z0-9_.-]+:)?[a-z0-9_.-]+(?:/[a-z0-9_.-]+)+(?:\.[a-z0-9]+)?\b",
+    r"\b(?:"
+    r"[a-z0-9_.-]+:[a-z0-9_.-]+(?:/[a-z0-9_.-]+)+(?:\.[a-z0-9]+)?"
+    r"|(?:assets|config|data|kubejs|models|recipes|textures|ftbquests|chapters|lang|scripts|shaderpacks)"
+    r"/[a-z0-9_.-]+(?:/[a-z0-9_.-]+)*(?:\.[a-z0-9]+)?"
+    r"|[a-z0-9_.-]+(?:/[a-z0-9_.-]+)+\.[a-z0-9]+"
+    r")\b",
     re.IGNORECASE,
 )
 
@@ -139,6 +150,19 @@ def preserved_token_warnings(source: str, translated: str) -> list[str]:
             len(warnings), source, translated,
         )
     return warnings
+
+
+def repair_translation_format(source: str, translated: str) -> str:
+    """Apply conservative local repairs before rejecting a translation.
+
+    This intentionally handles only edits that are mechanically safe.  The main
+    case is an LLM duplicating colour/style codes to "close" a highlighted
+    phrase, e.g. ``&f与&d军需官的回响&f对话`` when the source only contained one
+    ``&f`` and one ``&d``.  Extra colour codes change styling but do not carry
+    content or IDs, so removing extras is safer than discarding the whole
+    translation.  Missing or changed required codes are still rejected.
+    """
+    return _remove_extra_style_tokens(source, translated)
 
 
 # ---------------------------------------------------------------------------
@@ -280,3 +304,40 @@ def _extract_flat_tokens(text: str) -> list[str]:
 
 def _is_movable_style_token(token: str) -> bool:
     return bool(_COLOR_PATTERN.fullmatch(token))
+
+
+def _remove_extra_style_tokens(source: str, translated: str) -> str:
+    """Remove colour/style tokens that appear only in the translation.
+
+    The repair is deliberately one-way: it only removes surplus style tokens.
+    It never invents a missing source token and never edits JSON component
+    strings, where changing raw text can accidentally alter structure.
+    """
+    if _looks_like_json(source.strip()) or _looks_like_json(translated.strip()):
+        return translated
+
+    source_style = Counter(match.group() for match in _COLOR_PATTERN.finditer(source))
+    target_matches = list(_COLOR_PATTERN.finditer(translated))
+    target_style = Counter(match.group() for match in target_matches)
+
+    if not target_matches or source_style == target_style:
+        return translated
+    if source_style - target_style:
+        return translated
+
+    remaining = Counter(source_style)
+    remove_spans: list[tuple[int, int]] = []
+    for match in target_matches:
+        token = match.group()
+        if remaining[token] > 0:
+            remaining[token] -= 1
+        else:
+            remove_spans.append(match.span())
+
+    if not remove_spans:
+        return translated
+
+    result = translated
+    for start, end in reversed(remove_spans):
+        result = result[:start] + result[end:]
+    return result

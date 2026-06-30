@@ -14,7 +14,7 @@ from ftb_translater.backup import create_backup
 from ftb_translater.cache import TranslationCache
 from ftb_translater.chapters import chapter_files, extract_chapter_segments, replace_chapter_segments
 from ftb_translater.deepseek_client import DEFAULT_BASE_URL, DEFAULT_MODEL, DEFAULT_STYLE, DeepSeekTranslator
-from ftb_translater.format_guard import preserved_token_warnings, protect_text, restore_text
+from ftb_translater.format_guard import preserved_token_warnings, protect_text, repair_translation_format, restore_text
 from ftb_translater.logger import get_logger
 from ftb_translater.paths import detect_source_mode, source_lang_path, target_lang_path
 from ftb_translater.report import TranslationReport
@@ -562,6 +562,7 @@ def _guard_translation(
 ) -> tuple[str, list[str]]:
     # Restore the exact tokens that were removed before sending text to the model.
     restored = restore_text(translated_text, protections)
+    restored = repair_translation_format(source_text, restored)
 
     token_warnings = preserved_token_warnings(source_text, restored)
     if token_warnings:

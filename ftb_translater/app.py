@@ -21,7 +21,7 @@ from ftb_translater.config import (
     save_config_values,
 )
 from ftb_translater.deepseek_client import DEFAULT_BASE_URL, DEFAULT_MODEL, DEFAULT_STYLE, DeepSeekTranslator
-from ftb_translater.format_guard import protect_text, restore_text, preserved_token_warnings
+from ftb_translater.format_guard import protect_text, repair_translation_format, restore_text, preserved_token_warnings
 from ftb_translater.history_db import FileRecord, HistoryDB, RunSummary
 from ftb_translater.report import TranslationReport
 from ftb_translater.chapters import count_chapter_segments, replace_chapter_segments
@@ -979,6 +979,7 @@ class FtbTranslaterApp(ctk.CTk):
                 result = translator.translate_batch(batch, style=style)
                 translated = result.get(key, protected_source)
                 restored = restore_text(translated, protections)
+                restored = repair_translation_format(source, restored)
                 warnings = preserved_token_warnings(source, restored)
                 if warnings:
                     self.after(0, lambda t=restored: self._on_retranslate_result(
@@ -1050,6 +1051,7 @@ class FtbTranslaterApp(ctk.CTk):
                     result = translator.translate_batch(batch, style=style)
                     translated = result.get(key, protected_source)
                     restored = restore_text(translated, protections)
+                    restored = repair_translation_format(source, restored)
                     warnings = preserved_token_warnings(source, restored)
                     if warnings:
                         warning_count += 1

@@ -25,7 +25,7 @@ from ftb_translater.config import (
     save_config_values,
 )
 from ftb_translater.deepseek_client import DeepSeekTranslator
-from ftb_translater.format_guard import preserved_token_warnings, protect_text, restore_text
+from ftb_translater.format_guard import preserved_token_warnings, protect_text, repair_translation_format, restore_text
 from ftb_translater.paths import detect_source_mode, resolve_quests_dir
 from ftb_translater.snbt import dump_lang_snbt, parse_lang_snbt, write_lang_snbt
 from ftb_translater.translator import (
@@ -309,6 +309,15 @@ class CoreTests(unittest.TestCase):
 
         self.assertEqual(preserved_token_warnings(source, translated), [])
 
+    def test_format_guard_repairs_extra_colour_codes(self) -> None:
+        source = "&fSpeak With The &dEcho of The Quartermaster"
+        translated = "&f与&d军需官的回响&f对话"
+
+        repaired = repair_translation_format(source, translated)
+
+        self.assertEqual(repaired, "&f与&d军需官的回响对话")
+        self.assertEqual(preserved_token_warnings(source, repaired), [])
+
     def test_format_guard_still_requires_non_colour_token_order(self) -> None:
         source = "Use %s on <item:minecraft:stone>"
         translated = "对<item:minecraft:stone>使用%s"
@@ -316,7 +325,10 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(preserved_token_warnings(source, translated))
 
     def test_format_guard_protects_ftb_macros_and_resource_paths(self) -> None:
-        source = "See {@pagebreak} and {image:ftb:textures/quests/mekanism/portal_frame.png width:100 height:100 align:center}"
+        source = (
+            "See {@pagebreak}, ftb:textures/quests/mekanism/portal_frame.png, "
+            "and {image:ftb:textures/quests/mekanism/portal_frame.png width:100 height:100 align:center}"
+        )
 
         protected, protections = protect_text(source)
         self.assertNotIn("pagebreak", protected)
@@ -325,8 +337,21 @@ class CoreTests(unittest.TestCase):
         translated = protected.replace("See", "查看")
         restored = restore_text(translated, protections)
         self.assertIn("{@pagebreak}", restored)
+        self.assertIn("ftb:textures/quests/mekanism/portal_frame.png", restored)
         self.assertIn("{image:ftb:textures/quests/mekanism/portal_frame.png width:100 height:100 align:center}", restored)
         self.assertEqual(preserved_token_warnings(source, restored), [])
+
+    def test_format_guard_does_not_protect_common_slash_phrases(self) -> None:
+        source = "Transfer items and/or fluids with input/output, Up/Down, I/O, and RF/t labels."
+
+        protected, protections = protect_text(source)
+
+        self.assertEqual(protected, source)
+        self.assertEqual(protections, [])
+        self.assertEqual(
+            preserved_token_warnings(source, "传输物品或流体，并显示输入输出、上下、IO 和 RF/t 标签。"),
+            [],
+        )
 
     def test_deepseek_prompt_emphasizes_placeholder_wrappers(self) -> None:
         prompt = DeepSeekTranslator._build_prompt({"desc": "Defeat ⟨P_0⟩Ignis⟨P_1⟩"}, "style")
