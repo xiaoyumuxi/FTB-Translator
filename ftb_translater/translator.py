@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import threading
 from dataclasses import dataclass
+from typing import Protocol, cast
 
 from ftb_translater.backup import create_backup
 from ftb_translater.cache import TranslationCache
@@ -28,6 +29,10 @@ AUTO_BATCH_MAX_ENTRIES = 25
 AUTO_BATCH_MAX_CHARS = 6000
 AUTO_MAX_WORKERS = 6
 MAX_WORKERS_ENV = "FTB_TRANSLATER_CONCURRENCY"
+
+
+class TranslatorClient(Protocol):
+    def translate_batch(self, entries: Mapping[str, str], style: str) -> dict[str, str]: ...
 
 
 @dataclass(frozen=True)
@@ -78,7 +83,7 @@ def translate_quests_lang(
     style: str = DEFAULT_STYLE,
     progress: ProgressCallback | None = None,
     logger: LogCallback | None = None,
-    translator: DeepSeekTranslator | None = None,
+    translator: TranslatorClient | None = None,
     max_workers: int | None = None,
     base_url: str = DEFAULT_BASE_URL,
 ) -> TranslationReport:
@@ -140,7 +145,10 @@ def translate_quests_lang(
         result = batch_result.result
         if batch_result.error is not None:
             for key in batch:
+                error_text = f"API batch failed: {batch_result.error}"
                 failed_entries.append(f"{key}: {batch_result.error}")
+                warnings[key] = [error_text]
+                failed_translations[key] = {"source": pending_sources[key], "failed": "", "error": error_text}
         for key, protected_text in batch.items():
             source_text = pending_sources[key]
             translated_text = result.get(key, protected_text)
@@ -213,7 +221,7 @@ def translate_quests_chapters(
     style: str = DEFAULT_STYLE,
     progress: ProgressCallback | None = None,
     logger: LogCallback | None = None,
-    translator: DeepSeekTranslator | None = None,
+    translator: TranslatorClient | None = None,
     max_workers: int | None = None,
     base_url: str = DEFAULT_BASE_URL,
 ) -> TranslationReport:
@@ -277,7 +285,10 @@ def translate_quests_chapters(
         result = batch_result.result
         if batch_result.error is not None:
             for key in batch:
+                error_text = f"API batch failed: {batch_result.error}"
                 failed_entries.append(f"{key}: {batch_result.error}")
+                warnings[key] = [error_text]
+                failed_translations[key] = {"source": pending_sources[key], "failed": "", "error": error_text}
         for cache_id, protected_text in batch.items():
             segment = segment_by_id[cache_id]
             source_text = pending_sources[cache_id]
@@ -341,7 +352,7 @@ def translate_quests_auto(
     style: str = DEFAULT_STYLE,
     progress: ProgressCallback | None = None,
     logger: LogCallback | None = None,
-    translator: DeepSeekTranslator | None = None,
+    translator: TranslatorClient | None = None,
     max_workers: int | None = None,
     base_url: str = DEFAULT_BASE_URL,
 ) -> TranslationReport:
@@ -384,7 +395,7 @@ def _translate_batches(
     progress: ProgressCallback | None,
     progress_total: int,
     label: str,
-    translator: DeepSeekTranslator | None,
+    translator: TranslatorClient | None,
     max_workers: int | None,
 ) -> list[_BatchResult]:
     worker_count = _resolve_max_workers(max_workers, len(batches), progress_total)
@@ -427,7 +438,7 @@ def _translate_batches(
     def worker(batch_index: int, batch: OrderedDict[str, str]) -> _BatchResult:
         worker_translator = translator
         if worker_translator is None:
-            worker_translator = getattr(thread_state, "translator", None)
+            worker_translator = cast(TranslatorClient | None, getattr(thread_state, "translator", None))
             if worker_translator is None:
                 worker_translator = DeepSeekTranslator(api_key=api_key, model=model, base_url=base_url, logger=logger)
                 thread_state.translator = worker_translator
@@ -468,7 +479,7 @@ def _translate_one_batch(
     base_url: str,
     logger: LogCallback | None,
     label: str,
-    translator: DeepSeekTranslator | None,
+    translator: TranslatorClient | None,
 ) -> _BatchResult:
     client = translator or DeepSeekTranslator(api_key=api_key, model=model, base_url=base_url, logger=logger)
     msg = f"DeepSeek batch {batch_index}/{batch_count}: {len(batch)} {label}."

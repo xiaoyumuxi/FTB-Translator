@@ -6,6 +6,7 @@ import threading
 import time
 import tempfile
 import unittest
+from collections.abc import Mapping
 from pathlib import Path
 from unittest.mock import patch
 
@@ -24,6 +25,7 @@ from ftb_translater.config import (
     save_config_values,
     save_api_key,
 )
+from ftb_translater.deepseek_client import DeepSeekTranslator
 from ftb_translater.format_guard import preserved_token_warnings, protect_text, restore_text
 from ftb_translater.paths import detect_source_mode, resolve_quests_dir
 from ftb_translater.snbt import dump_lang_snbt, parse_lang_snbt, write_lang_snbt
@@ -39,15 +41,22 @@ from ftb_translater.translator import (
 class FakeTranslator:
     model = "deepseek-v4-flash"
 
-    def translate_batch(self, entries, style):
+    def translate_batch(self, entries: Mapping[str, str], style: str) -> dict[str, str]:
         return {key: f"汉化:{value}" for key, value in entries.items()}
 
 
 class UnsafeTranslator:
     model = "deepseek-v4-flash"
 
-    def translate_batch(self, entries, style):
+    def translate_batch(self, entries: Mapping[str, str], style: str) -> dict[str, str]:
         return {key: "破坏格式的译文" for key in entries}
+
+
+class FailingTranslator:
+    model = "deepseek-v4-flash"
+
+    def translate_batch(self, entries: Mapping[str, str], style: str) -> dict[str, str]:
+        raise RuntimeError("network down")
 
 
 class TrackingTranslator:
@@ -58,7 +67,7 @@ class TrackingTranslator:
         self.max_active = 0
         self.lock = threading.Lock()
 
-    def translate_batch(self, entries, style):
+    def translate_batch(self, entries: Mapping[str, str], style: str) -> dict[str, str]:
         with self.lock:
             self.active += 1
             self.max_active = max(self.max_active, self.active)
@@ -76,7 +85,7 @@ class RecordingProtectedTranslator:
     def __init__(self):
         self.seen_values: list[str] = []
 
-    def translate_batch(self, entries, style):
+    def translate_batch(self, entries: Mapping[str, str], style: str) -> dict[str, str]:
         self.seen_values.extend(entries.values())
         return {
             key: value.replace("Defeat", "击败")
@@ -250,6 +259,16 @@ class CoreTests(unittest.TestCase):
         self.assertIn("{image:ftb:textures/quests/mekanism/portal_frame.png width:100 height:100 align:center}", restored)
         self.assertEqual(preserved_token_warnings(source, restored), [])
 
+    def test_deepseek_prompt_emphasizes_placeholder_wrappers(self) -> None:
+        prompt = DeepSeekTranslator._build_prompt({"desc": "Defeat ⟨P_0⟩Ignis⟨P_1⟩"}, "style")
+
+        self.assertIn("Every placeholder from the input value must appear", prompt)
+        self.assertIn("每个占位符", prompt)
+        self.assertIn("Translate the word but keep both wrappers", prompt)
+        self.assertIn("占位符包住的英文也必须翻译", prompt)
+        self.assertIn("⟨P_0⟩下界⟨P_1⟩", prompt)
+        self.assertIn("lost closing wrapper", prompt)
+
     def test_translate_quests_lang_integration(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -316,6 +335,28 @@ class CoreTests(unittest.TestCase):
             output = parse_lang_snbt((lang / "zh_cn.snbt").read_text(encoding="utf-8"))
             self.assertEqual(output["desc"], source)
             self.assertTrue(report.warnings["desc"])
+
+    def test_translate_quests_lang_reports_failed_mapping_details(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            quests = root / "config" / "ftbquests" / "quests"
+            lang = quests / "lang"
+            lang.mkdir(parents=True)
+            write_lang_snbt(lang / "en_us.snbt", {"desc": "Use a stone"})
+
+            report = translate_quests_lang(
+                quests,
+                api_key="unused",
+                batch_size=1,
+                translator=FailingTranslator(),
+            )
+
+            output = parse_lang_snbt((lang / "zh_cn.snbt").read_text(encoding="utf-8"))
+            self.assertEqual(output["desc"], "Use a stone")
+            self.assertIn("desc", report.warnings)
+            self.assertEqual(report.failed_translations["desc"]["source"], "Use a stone")
+            self.assertEqual(report.failed_translations["desc"]["failed"], "")
+            self.assertIn("network down", report.failed_translations["desc"]["error"])
 
     def test_translate_quests_lang_sends_protected_text_to_model(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

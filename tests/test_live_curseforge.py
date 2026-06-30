@@ -6,6 +6,7 @@ import unittest
 import urllib.error
 import urllib.request
 import zipfile
+from collections.abc import Mapping
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -24,7 +25,7 @@ DEFAULT_MAX_DOWNLOAD_MB = 250
 class FakeTranslator:
     model = "deepseek-v4-flash"
 
-    def translate_batch(self, entries, style):
+    def translate_batch(self, entries: Mapping[str, str], style: str) -> dict[str, str]:
         return {key: f"汉化:{value}" for key, value in entries.items()}
 
 

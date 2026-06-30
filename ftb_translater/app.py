@@ -5,6 +5,7 @@ import threading
 from collections import OrderedDict
 from pathlib import Path
 from tkinter import filedialog, messagebox
+from typing import Literal, TypeAlias, TypedDict, cast
 
 import customtkinter as ctk
 
@@ -22,13 +23,40 @@ from ftb_translater.config import (
 from ftb_translater.deepseek_client import DEFAULT_BASE_URL, DEFAULT_MODEL, DEFAULT_STYLE, DeepSeekTranslator
 from ftb_translater.format_guard import protect_text, restore_text, preserved_token_warnings
 from ftb_translater.report import TranslationReport
-from ftb_translater.chapters import count_chapter_segments
+from ftb_translater.chapters import count_chapter_segments, replace_chapter_segments
 from ftb_translater.logger import get_logger, setup_logging
 from ftb_translater.paths import detect_source_mode, resolve_quests_dir, source_lang_path
 from ftb_translater.snbt import load_lang_snbt, write_lang_snbt
 from ftb_translater.translator import AUTO_BATCH_MAX_ENTRIES, AUTO_MAX_WORKERS, estimate_batches, translate_quests_auto
 
 _log = get_logger(__name__)
+
+
+class _RunSettings(TypedDict):
+    api_key: str
+    batch_size: int | None
+    model: str
+    style: str
+    base_url: str
+    max_workers: int | None
+
+
+class _ReviewEntryData(TypedDict):
+    source: str
+    failed: str
+    textbox: ctk.CTkTextbox
+    status_label: ctk.CTkLabel
+    retrans_btn: ctk.CTkButton
+    frame: ctk.CTkFrame
+
+
+_ProgressPayload: TypeAlias = tuple[str, int, int]
+_AppQueueItem: TypeAlias = (
+    tuple[Literal["progress"], _ProgressPayload]
+    | tuple[Literal["log"], str]
+    | tuple[Literal["done"], TranslationReport]
+    | tuple[Literal["error"], Exception]
+)
 
 
 class FtbTranslaterApp(ctk.CTk):
@@ -54,13 +82,13 @@ class FtbTranslaterApp(ctk.CTk):
         self.progress_text = ctk.StringVar(value="等待扫描")
         self.settings_status = ctk.StringVar(value="API Key 会通过此界面保存和读取。")
         self._quests_dir: Path | None = None
-        self._queue: queue.Queue[tuple[str, object]] = queue.Queue()
+        self._queue: queue.Queue[_AppQueueItem] = queue.Queue()
         self._key_visible = False
         self._step_labels: dict[str, ctk.CTkLabel] = {}
         self._nav_buttons: dict[str, ctk.CTkButton] = {}
-        self._run_settings: dict[str, object] = {}
+        self._run_settings: _RunSettings | None = None
         self._review_report: TranslationReport | None = None
-        self._review_data: dict[str, dict] = {}
+        self._review_data: dict[str, _ReviewEntryData] = {}
         self._build_ui()
         self._set_stage("idle")
         self.after(150, self._drain_queue)
@@ -69,91 +97,67 @@ class FtbTranslaterApp(ctk.CTk):
         ctk.set_appearance_mode("System")
         ctk.set_default_color_theme("blue")
 
-        self.configure(fg_color=("#EEF2F7", "#111318"))
-        self.grid_columnconfigure(1, weight=1)
-        self.grid_rowconfigure(0, weight=1)
+        self.configure(fg_color=("#F6F8FC", "#0F131A"))
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=1)
 
-        sidebar = ctk.CTkFrame(self, width=248, corner_radius=0, fg_color=("#111827", "#0B0F14"))
-        sidebar.grid(row=0, column=0, sticky="nsew")
-        sidebar.grid_propagate(False)
-        sidebar.grid_rowconfigure(11, weight=1)
-
-        ctk.CTkLabel(
-            sidebar,
-            text="FTB\nTranslater",
-            justify="left",
-            font=ctk.CTkFont(size=30, weight="bold"),
-            text_color="#F9FAFB",
-        ).grid(row=0, column=0, sticky="ew", padx=24, pady=(30, 8))
-        ctk.CTkLabel(
-            sidebar,
-            text="现代 FTB Quests 任务书汉化工具",
-            justify="left",
-            wraplength=180,
-            text_color="#A7B0BF",
-        ).grid(row=1, column=0, sticky="ew", padx=24, pady=(0, 30))
-
-        for row, (key, text) in enumerate(
-            [
-                ("idle", "选择整合包"),
-                ("scanned", "确认扫描结果"),
-                ("running", "执行汉化"),
-                ("done", "查看输出"),
-            ],
-            start=2,
-        ):
-            self._step_labels[key] = ctk.CTkLabel(
-                sidebar,
-                text=text,
-                anchor="w",
-                height=38,
-                corner_radius=8,
-                padx=14,
-                font=ctk.CTkFont(size=14, weight="bold"),
-                text_color="#DDE4EF",
-                fg_color="transparent",
-            )
-            self._step_labels[key].grid(row=row, column=0, sticky="ew", padx=18, pady=4)
-
-        ctk.CTkLabel(sidebar, text="目录", text_color="#7D8999", anchor="w").grid(
-            row=6, column=0, sticky="ew", padx=24, pady=(22, 8)
+        topbar = ctk.CTkFrame(
+            self,
+            height=70,
+            corner_radius=18,
+            fg_color=("#FFFFFF", "#161B24"),
+            border_width=1,
+            border_color=("#E3E8F2", "#252C38"),
         )
-        self._nav_buttons["workbench"] = ctk.CTkButton(
-            sidebar,
-            text="工作台",
+        topbar.grid(row=0, column=0, sticky="ew", padx=28, pady=(20, 0))
+        topbar.grid_columnconfigure(1, weight=1)
+        topbar.grid_rowconfigure(0, weight=1)
+        topbar.grid_propagate(False)
+
+        brand = ctk.CTkFrame(topbar, fg_color="transparent")
+        brand.grid(row=0, column=0, sticky="w", padx=20)
+        ctk.CTkLabel(
+            brand,
+            text="FTB Translater",
             anchor="w",
-            height=38,
-            command=lambda: self._show_view("workbench"),
-        )
-        self._nav_buttons["workbench"].grid(row=7, column=0, sticky="ew", padx=18, pady=4)
+            font=ctk.CTkFont(size=22, weight="bold"),
+            text_color=("#0F172A", "#F8FAFC"),
+        ).grid(row=0, column=0, sticky="w")
         self._nav_buttons["settings"] = ctk.CTkButton(
-            sidebar,
-            text="设置",
-            anchor="w",
-            height=38,
+            brand,
+            text="⚙",
+            width=30,
+            height=30,
+            corner_radius=15,
             command=lambda: self._show_view("settings"),
+            font=ctk.CTkFont(size=15, weight="bold"),
         )
-        self._nav_buttons["settings"].grid(row=8, column=0, sticky="ew", padx=18, pady=4)
+        self._nav_buttons["settings"].grid(row=0, column=1, sticky="w", padx=(10, 0))
+        ctk.CTkLabel(
+            brand,
+            text="FTB Quests 任务书汉化工具",
+            anchor="w",
+            text_color=("#64748B", "#94A3B8"),
+            font=ctk.CTkFont(size=12),
+        ).grid(row=1, column=0, sticky="w", pady=(2, 0))
 
-        ctk.CTkLabel(sidebar, text="外观", text_color="#7D8999", anchor="w").grid(
-            row=9, column=0, sticky="ew", padx=24, pady=(22, 8)
-        )
         self.appearance_segment = ctk.CTkSegmentedButton(
-            sidebar,
+            topbar,
             values=["系统", "浅色", "深色"],
             command=self._change_appearance,
             selected_color="#2563EB",
             selected_hover_color="#1D4ED8",
+            height=34,
         )
-        self.appearance_segment.grid(row=10, column=0, sticky="ew", padx=24)
+        self.appearance_segment.grid(row=0, column=2, sticky="e", padx=(0, 14))
         self.appearance_segment.set("系统")
 
-        ctk.CTkLabel(sidebar, text="v0.1.0", text_color="#596579", anchor="w").grid(
-            row=12, column=0, sticky="sw", padx=24, pady=24
+        ctk.CTkLabel(topbar, text="v0.1.2", text_color=("#94A3B8", "#64748B"), anchor="e").grid(
+            row=0, column=3, sticky="e", padx=(0, 20)
         )
 
         main = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
-        main.grid(row=0, column=1, sticky="nsew", padx=24, pady=22)
+        main.grid(row=1, column=0, sticky="nsew", padx=28, pady=(18, 24))
         main.grid_columnconfigure(0, weight=1)
         main.grid_rowconfigure(4, weight=1)
         self.workbench_frame = main
@@ -183,6 +187,30 @@ class FtbTranslaterApp(ctk.CTk):
             text_color=("#5B6676", "#AAB3C2"),
         ).grid(row=1, column=0, columnspan=2, sticky="ew", pady=(6, 0))
 
+        stepper = ctk.CTkFrame(header, fg_color="transparent")
+        stepper.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(14, 0))
+        for col in range(4):
+            stepper.grid_columnconfigure(col, weight=1)
+        for col, (key, text) in enumerate(
+            [
+                ("idle", "选择整合包"),
+                ("scanned", "确认扫描结果"),
+                ("running", "执行汉化"),
+                ("done", "查看输出"),
+            ]
+        ):
+            self._step_labels[key] = ctk.CTkLabel(
+                stepper,
+                text=text,
+                height=34,
+                corner_radius=17,
+                padx=12,
+                font=ctk.CTkFont(size=13, weight="bold"),
+                text_color=("#64748B", "#94A3B8"),
+                fg_color=("#EAF0F8", "#1A2230"),
+            )
+            self._step_labels[key].grid(row=0, column=col, sticky="ew", padx=(0 if col == 0 else 8, 0))
+
         source_panel = self._panel(main, "1. 选择整合包", "可以选择整合包根目录，也可以直接选择 quests、lang 或 chapters 目录。")
         source_panel.grid(row=1, column=0, sticky="ew", pady=(0, 12))
         source_panel.grid_columnconfigure(0, weight=1)
@@ -209,7 +237,13 @@ class FtbTranslaterApp(ctk.CTk):
             wraplength=660,
         ).grid(row=2, column=0, sticky="ew", padx=18, pady=(0, 18))
 
-        run_panel = ctk.CTkFrame(main, corner_radius=14, border_width=1, border_color=("#D8DEE8", "#262B33"))
+        run_panel = ctk.CTkFrame(
+            main,
+            corner_radius=18,
+            border_width=1,
+            fg_color=("#FFFFFF", "#161B24"),
+            border_color=("#E1E8F2", "#293241"),
+        )
         run_panel.grid(row=3, column=0, sticky="ew", pady=(0, 12))
         run_panel.grid_columnconfigure(0, weight=1)
         self.progress = ctk.CTkProgressBar(run_panel, height=12)
@@ -253,7 +287,7 @@ class FtbTranslaterApp(ctk.CTk):
         review_panel.grid_remove()
         self.review_panel = review_panel
 
-        self._review_title = ctk.StringVar(value="检查翻译")
+        self._review_title = ctk.StringVar(value="人工处理")
         ctk.CTkLabel(
             review_panel, textvariable=self._review_title, anchor="w",
             font=ctk.CTkFont(size=16, weight="bold"),
@@ -302,7 +336,7 @@ class FtbTranslaterApp(ctk.CTk):
 
     def _build_settings_view(self) -> None:
         settings = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
-        settings.grid(row=0, column=1, sticky="nsew", padx=24, pady=22)
+        settings.grid(row=1, column=0, sticky="nsew", padx=28, pady=(18, 24))
         settings.grid_columnconfigure(0, weight=1)
         settings.grid_rowconfigure(1, weight=1)
         self.settings_frame = settings
@@ -404,18 +438,22 @@ class FtbTranslaterApp(ctk.CTk):
         self._review_data.clear()
 
         report = self._review_report
-        if report is None or not report.warnings:
+        if report is None:
+            self._hide_review_panel()
+            return
+
+        entries = self._review_entries(report)
+        if not entries:
             self._hide_review_panel()
             return
 
         self.review_panel.grid()
         self.review_panel.master.grid_rowconfigure(1, weight=1)
-        self._review_title.set(f"检查翻译  —  {len(report.warnings)} 条格式 token 告警")
-        self._review_badge.configure(text=f"待处理 {len(report.warnings)}")
+        self._review_title.set(f"人工处理  —  {len(entries)} 条需要确认的映射")
+        self._review_badge.configure(text=f"待处理 {len(entries)}")
 
-        entries = list(report.warnings.items())
         self._review_subtitle.configure(
-            text="AI 翻译改变了格式 token 顺序，已被保留为原文。可手动编辑后保存，或点击重新翻译重试。"
+            text="这些条目因为 API 失败或格式保护被保留为原文。可以逐条编辑后保存，也可以重新翻译或忽略。"
         )
 
         for idx, (key, warning_list) in enumerate(entries):
@@ -441,7 +479,7 @@ class FtbTranslaterApp(ctk.CTk):
                 text_color="#9CA3AF",
             ).grid(row=0, column=0, sticky="ew")
             ctk.CTkLabel(
-                key_row, text="格式保护拦截", height=24, corner_radius=12, padx=10,
+                key_row, text="待人工确认", height=24, corner_radius=12, padx=10,
                 fg_color=("#FEF3C7", "#78350F"), text_color=("#92400E", "#FDE68A"),
                 font=ctk.CTkFont(size=11, weight="bold"),
             ).grid(row=0, column=1, sticky="e")
@@ -524,6 +562,21 @@ class FtbTranslaterApp(ctk.CTk):
                 "frame": card,
             }
 
+    def _review_entries(self, report: TranslationReport) -> list[tuple[str, list[str]]]:
+        entries: OrderedDict[str, list[str]] = OrderedDict()
+        for key, warning_list in report.warnings.items():
+            entries[key] = list(warning_list)
+        for failed_entry in report.failed_entries:
+            key, _, error = failed_entry.partition(":")
+            key = key.strip()
+            if not key:
+                continue
+            if key in entries:
+                continue
+            message = error.strip() or failed_entry
+            entries.setdefault(key, []).append(f"API 调用失败：{message}")
+        return list(entries.items())
+
     def _hide_review_panel(self) -> None:
         for widget in self._review_scroll.winfo_children():
             widget.destroy()
@@ -549,12 +602,30 @@ class FtbTranslaterApp(ctk.CTk):
                 values = load_lang_snbt(target)
                 values[key] = new_text
                 write_lang_snbt(target, values)
+            elif target.is_dir():
+                self._save_chapter_review_entry(target, key, new_text)
             else:
-                status_label.configure(text="错误：暂不支持章节式保存。")
+                status_label.configure(text=f"错误：无法识别目标文件 {target}")
                 return
             status_label.configure(text="已保存 \u2713")
         except Exception as exc:
             status_label.configure(text=f"保存失败：{exc}")
+
+    def _save_chapter_review_entry(self, chapters_dir: Path, key: str, new_text: str) -> None:
+        parts = key.split(":", 2)
+        if len(parts) != 3:
+            raise ValueError(f"章节映射 key 格式无效：{key}")
+        filename, index_text, _segment_key = parts
+        try:
+            segment_index = int(index_text)
+        except ValueError as exc:
+            raise ValueError(f"章节映射序号无效：{key}") from exc
+        chapter_path = chapters_dir / filename
+        if not chapter_path.exists():
+            raise FileNotFoundError(f"章节文件不存在：{chapter_path}")
+        replaced = replace_chapter_segments(chapter_path, {segment_index: new_text})
+        if replaced != 1:
+            raise ValueError(f"未能定位章节文本段：{key}")
 
     def _retranslate_single(
         self, key: str, source: str,
@@ -570,19 +641,20 @@ class FtbTranslaterApp(ctk.CTk):
 
         def worker():
             try:
+                selected_api_key, model, style, base_url = self._current_translator_settings(api_key)
                 translator = DeepSeekTranslator(
-                    api_key=self._run_settings.get("api_key", api_key),
-                    model=self._run_settings.get("model") or DEFAULT_MODEL,
-                    base_url=self._run_settings.get("base_url") or DEFAULT_BASE_URL,
+                    api_key=selected_api_key,
+                    model=model,
+                    base_url=base_url,
                 )
                 protected_source, protections = protect_text(source)
                 batch = OrderedDict([(key, protected_source)])
-                result = translator.translate_batch(batch, style=self._run_settings.get("style") or DEFAULT_STYLE)
+                result = translator.translate_batch(batch, style=style)
                 translated = result.get(key, protected_source)
                 restored = restore_text(translated, protections)
                 warnings = preserved_token_warnings(source, restored)
                 if warnings:
-                    self.after(0, lambda t=translated: self._on_retranslate_result(
+                    self.after(0, lambda t=restored: self._on_retranslate_result(
                         textbox, status_label, button, t,
                         f"仍有 {len(warnings)} 个告警，可手动编辑后保存。",
                     ))
@@ -591,9 +663,9 @@ class FtbTranslaterApp(ctk.CTk):
                         textbox, status_label, button, restored, "翻译成功 \u2713",
                     ))
             except Exception as exc:
-                self.after(0, lambda: self._on_retranslate_result(
+                self.after(0, lambda e=exc: self._on_retranslate_result(
                     textbox, status_label, button, "",
-                    f"翻译失败：{exc}",
+                    f"翻译失败：{e}",
                 ))
 
         thread = threading.Thread(target=worker, daemon=True)
@@ -630,10 +702,11 @@ class FtbTranslaterApp(ctk.CTk):
 
         def worker():
             try:
+                selected_api_key, model, style, base_url = self._current_translator_settings(api_key)
                 translator = DeepSeekTranslator(
-                    api_key=self._run_settings.get("api_key") or api_key,
-                    model=self._run_settings.get("model") or DEFAULT_MODEL,
-                    base_url=self._run_settings.get("base_url") or DEFAULT_BASE_URL,
+                    api_key=selected_api_key,
+                    model=model,
+                    base_url=base_url,
                 )
             except Exception as exc:
                 self.after(0, lambda e=exc: self._on_retranslate_all_error(e))
@@ -647,13 +720,13 @@ class FtbTranslaterApp(ctk.CTk):
                 try:
                     protected_source, protections = protect_text(source)
                     batch = OrderedDict([(key, protected_source)])
-                    result = translator.translate_batch(batch, style=self._run_settings.get("style") or DEFAULT_STYLE)
+                    result = translator.translate_batch(batch, style=style)
                     translated = result.get(key, protected_source)
                     restored = restore_text(translated, protections)
                     warnings = preserved_token_warnings(source, restored)
                     if warnings:
                         warning_count += 1
-                        self.after(0, lambda k=key, t=translated, w=warnings:
+                        self.after(0, lambda k=key, t=restored, w=warnings:
                             self._on_batch_retranslate(k, t, w))
                     else:
                         ok += 1
@@ -719,7 +792,7 @@ class FtbTranslaterApp(ctk.CTk):
             self._review_badge.configure(text="待处理 0")
         else:
             self._review_badge.configure(text=f"待处理 {len(self._review_data)}")
-            self._review_title.set(f"检查翻译  —  {len(self._review_data)} 条格式 token 告警")
+            self._review_title.set(f"人工处理  —  {len(self._review_data)} 条需要确认的映射")
         self._refresh_review_layout()
 
     def _refresh_review_layout(self) -> None:
@@ -735,12 +808,29 @@ class FtbTranslaterApp(ctk.CTk):
         self._review_subtitle.configure(text="已忽略所有条目。")
         self._review_badge.configure(text="待处理 0")
 
-    def _panel(self, parent: ctk.CTkFrame, title: str, description: str) -> ctk.CTkFrame:
-        panel = ctk.CTkFrame(parent, corner_radius=14, border_width=1, border_color=("#D8DEE8", "#262B33"))
-        ctk.CTkLabel(panel, text=title, anchor="w", font=ctk.CTkFont(size=16, weight="bold")).grid(
+    def _panel(
+        self,
+        parent: ctk.CTkFrame | ctk.CTkScrollableFrame,
+        title: str,
+        description: str,
+    ) -> ctk.CTkFrame:
+        panel = ctk.CTkFrame(
+            parent,
+            corner_radius=18,
+            border_width=1,
+            fg_color=("#FFFFFF", "#161B24"),
+            border_color=("#E1E8F2", "#293241"),
+        )
+        ctk.CTkLabel(
+            panel,
+            text=title,
+            anchor="w",
+            font=ctk.CTkFont(size=16, weight="bold"),
+            text_color=("#0F172A", "#F8FAFC"),
+        ).grid(
             row=0, column=0, columnspan=3, sticky="ew", padx=18, pady=(16, 2)
         )
-        ctk.CTkLabel(panel, text=description, anchor="w", text_color=("#687386", "#AAB3C2")).grid(
+        ctk.CTkLabel(panel, text=description, anchor="w", text_color=("#64748B", "#94A3B8")).grid(
             row=1, column=0, columnspan=3, sticky="ew", padx=18, pady=(0, 14)
         )
         return panel
@@ -760,7 +850,11 @@ class FtbTranslaterApp(ctk.CTk):
             if view == active_view:
                 button.configure(fg_color="#2563EB", hover_color="#1D4ED8", text_color="#FFFFFF")
             else:
-                button.configure(fg_color="transparent", hover_color="#1F2937", text_color="#DDE4EF")
+                button.configure(
+                    fg_color=("#EEF2F7", "#202938"),
+                    hover_color=("#E2E8F0", "#2B3444"),
+                    text_color=("#334155", "#DDE4EF"),
+                )
 
     def _change_appearance(self, value: str) -> None:
         modes = {"系统": "System", "浅色": "Light", "深色": "Dark"}
@@ -779,6 +873,22 @@ class FtbTranslaterApp(ctk.CTk):
     def _current_style(self) -> str:
         text = self.style_text.get("1.0", "end").strip()
         return text or DEFAULT_STYLE
+
+    def _current_translator_settings(self, fallback_api_key: str) -> tuple[str, str, str, str]:
+        settings = self._run_settings
+        if settings is not None:
+            return (
+                settings["api_key"] or fallback_api_key,
+                settings["model"],
+                settings["style"],
+                settings["base_url"],
+            )
+        return (
+            fallback_api_key,
+            self.model.get() or DEFAULT_MODEL,
+            self._current_style(),
+            self.base_url.get() or DEFAULT_BASE_URL,
+        )
 
     def _parse_optional_positive_int(self, value: str, label: str) -> int | None:
         stripped = value.strip()
@@ -843,7 +953,7 @@ class FtbTranslaterApp(ctk.CTk):
             if index <= active_index and stage != "error":
                 label.configure(fg_color="#1D4ED8", text_color="#FFFFFF")
             else:
-                label.configure(fg_color="transparent", text_color="#DDE4EF")
+                label.configure(fg_color=("#EAF0F8", "#1A2230"), text_color=("#64748B", "#94A3B8"))
 
     def _choose_dir(self) -> None:
         directory = filedialog.askdirectory()
@@ -951,6 +1061,10 @@ class FtbTranslaterApp(ctk.CTk):
 
     def _translate_worker(self) -> None:
         assert self._quests_dir is not None
+        settings = self._run_settings
+        if settings is None:
+            self._queue.put(("error", RuntimeError("翻译配置未初始化。")))
+            return
 
         def progress(stage: str, done: int, total: int) -> None:
             self._queue.put(("progress", (stage, done, total)))
@@ -962,12 +1076,12 @@ class FtbTranslaterApp(ctk.CTk):
             _log.info("Calling translate_quests_auto with quests_dir=%s", self._quests_dir)
             report = translate_quests_auto(
                 quests_dir=self._quests_dir,
-                api_key=str(self._run_settings["api_key"]),
-                batch_size=self._run_settings["batch_size"],  # type: ignore[arg-type]
-                model=str(self._run_settings["model"]),
-                style=str(self._run_settings["style"]),
-                base_url=str(self._run_settings["base_url"]),
-                max_workers=self._run_settings["max_workers"],  # type: ignore[arg-type]
+                api_key=settings["api_key"],
+                batch_size=settings["batch_size"],
+                model=settings["model"],
+                style=settings["style"],
+                base_url=settings["base_url"],
+                max_workers=settings["max_workers"],
                 progress=progress,
                 logger=logger,
             )
@@ -982,13 +1096,13 @@ class FtbTranslaterApp(ctk.CTk):
             while True:
                 kind, payload = self._queue.get_nowait()
                 if kind == "progress":
-                    stage, done, total = payload  # type: ignore[misc]
+                    stage, done, total = cast(_ProgressPayload, payload)
                     ratio = 1 if total == 0 else min(1, done / total)
                     self.progress.set(ratio)
                     self.status.set(f"{stage}: {done}/{total}")
                     self.progress_text.set(f"{stage}：{done}/{total}")
                 elif kind == "done":
-                    report = payload
+                    report = cast(TranslationReport, payload)
                     self.progress.set(1)
                     self.status.set("汉化完成。")
                     self.progress_text.set("汉化完成，可以查看日志和输出文件。")
@@ -997,8 +1111,10 @@ class FtbTranslaterApp(ctk.CTk):
                     self._log(f"备份：{report.backup_dir}")
                     self._log(f"缓存命中：{report.cache_hits}，失败：{len(report.failed_entries)}")
                     self._review_report = report
-                    if report.warnings:
+                    if report.warnings or report.failed_entries:
                         self._log(f"告警：{len(report.warnings)} 条翻译存在格式 token 问题。")
+                        if report.failed_entries:
+                            self._log(f"失败映射：{len(report.failed_entries)} 条需要人工处理。")
                         self._show_review_entries()
                     else:
                         self._hide_review_panel()
@@ -1007,7 +1123,7 @@ class FtbTranslaterApp(ctk.CTk):
                 elif kind == "log":
                     self._log(str(payload))
                 elif kind == "error":
-                    exc = payload
+                    exc = cast(Exception, payload)
                     self.status.set(str(exc))
                     self.progress_text.set("汉化失败，请查看日志。")
                     self._set_stage("error")

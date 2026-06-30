@@ -77,21 +77,8 @@ class DeepSeekTranslator:
 
     def _request_json(self, prompt: str, expected_keys: set[str]) -> dict[str, str]:
         _log.debug("Sending request to DeepSeek, expected keys: %s", sorted(expected_keys))
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a Minecraft modpack localization assistant. "
-                        "Translate only user-facing English quest text into Simplified Chinese."
-                    ),
-                },
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.2,
-            response_format={"type": "json_object"},
-        )
+        response = self._request_json_response(prompt)
+
         content = response.choices[0].message.content
         if not content:
             raise DeepSeekTranslationError("DeepSeek returned an empty response.")
@@ -111,20 +98,59 @@ class DeepSeekTranslator:
             _log.error("DeepSeek response missed keys: %s. Got keys: %s", sorted(missing), sorted(raw.keys()))
             raise DeepSeekTranslationError(f"DeepSeek response missed keys: {sorted(missing)}")
 
+        extra = set(raw) - expected_keys
+        if extra:
+            _log.warning("DeepSeek response returned extra keys that will be ignored: %s", sorted(extra))
+
         _log.debug("DeepSeek response OK: %d keys returned", len(expected_keys))
         return {key: str(raw[key]) for key in expected_keys}
+
+    def _request_json_response(self, prompt: str) -> Any:
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a Minecraft modpack localization assistant. 你是 Minecraft 整合包任务书汉化助手。 "
+                        "Translate only user-facing English quest text into natural Simplified Chinese. "
+                        "只翻译玩家可见英文为自然简体中文。 "
+                        "Never alter, remove, merge, or invent opaque placeholders such as ⟨P_0⟩. "
+                        "绝不能修改、删除、合并或新增 ⟨P_0⟩ 这类占位符。"
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.2,
+            response_format={"type": "json_object"},
+        )
+        return response
 
     @staticmethod
     def _build_prompt(entries: Mapping[str, str], style: str) -> str:
         payload = json.dumps(entries, ensure_ascii=False, indent=2)
         return (
-            f"Translate this FTB Quests language map to Simplified Chinese.\n"
-            f"Style: {style}.\n"
+            "Task / 任务：Translate this FTB Quests language map to Simplified Chinese.\n"
+            f"Style / 风格：{style}.\n"
             "Return one JSON object with exactly the same keys and translated string values.\n"
-            "Preserve all Minecraft formatting codes, placeholders, item IDs, tags, markdown links, "
-            "line breaks, escape sequences, and numbers. Do not translate keys.\n"
-            "Opaque placeholders like ⟨P_0⟩ represent formatting tokens only; keep them verbatim, "
-            "but still translate English words before, after, or between those placeholders.\n\n"
+            "返回一个 JSON 对象，key 必须与输入完全一致，value 是翻译后的字符串。\n\n"
+            "Hard rules / 硬性规则：\n"
+            "1. Translate English player-facing text into Simplified Chinese. 将玩家可见英文翻译为简体中文。\n"
+            "2. Do not translate JSON keys. 不要翻译 JSON key。\n"
+            "3. Opaque placeholders like ⟨P_0⟩, ⟨P_1⟩ are formatting/resource tokens, not words. 占位符是格式或资源标记，不是单词。\n"
+            "4. Every placeholder from the input value must appear in the output value exactly once. 输入 value 中每个占位符在输出 value 中必须出现且只出现一次。\n"
+            "5. Keep each placeholder byte-for-byte unchanged. Do not remove, rename, duplicate, merge, or reorder characters inside it. 占位符本身必须逐字完全不变。\n"
+            "6. Placeholders may wrap a word, e.g. ⟨P_0⟩Nether⟨P_1⟩. Translate the word but keep both wrappers: ⟨P_0⟩下界⟨P_1⟩. 占位符包住的英文也必须翻译，不能因为被包住就保留英文。\n"
+            "7. If Chinese word order moves a highlighted phrase, move the whole placeholder-wrapped phrase together. 中文语序变化时，移动整段被占位符包住的短语。\n"
+            "8. Preserve item IDs, tags, markdown links, line breaks, escape sequences, numbers, and units. 保留物品 ID、标签、链接、换行、转义、数字和单位。\n\n"
+            "Examples / 示例：\n"
+            "Input text: Defeat ⟨P_0⟩Ignis⟨P_1⟩ in the ⟨P_2⟩Burning Arena⟨P_3⟩.\n"
+            "Good: 在⟨P_2⟩燃烧竞技场⟨P_3⟩中击败⟨P_0⟩伊格尼斯⟨P_1⟩。\n"
+            "Bad: 在燃烧竞技场中击败⟨P_0⟩伊格尼斯⟨P_1⟩。  (lost ⟨P_2⟩ and ⟨P_3⟩)\n"
+            "Bad: 在⟨P_2⟩燃烧竞技场中击败⟨P_0⟩伊格尼斯⟨P_1⟩。  (lost closing wrapper ⟨P_3⟩)\n"
+            "Input text: Found in ⟨P_0⟩Nether⟨P_1⟩.\n"
+            "Good: 可在⟨P_0⟩下界⟨P_1⟩找到。\n"
+            "Bad: 可在下界找到。  (lost wrappers ⟨P_0⟩ and ⟨P_1⟩)\n\n"
             f"{payload}"
         )
 
