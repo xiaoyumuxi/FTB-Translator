@@ -122,7 +122,9 @@ class DeepSeekTranslator:
             f"Style: {style}.\n"
             "Return one JSON object with exactly the same keys and translated string values.\n"
             "Preserve all Minecraft formatting codes, placeholders, item IDs, tags, markdown links, "
-            "line breaks, escape sequences, and numbers. Do not translate keys.\n\n"
+            "line breaks, escape sequences, and numbers. Do not translate keys.\n"
+            "Opaque placeholders like ⟨P_0⟩ represent formatting tokens only; keep them verbatim, "
+            "but still translate English words before, after, or between those placeholders.\n\n"
             f"{payload}"
         )
 

@@ -24,7 +24,7 @@ from ftb_translater.config import (
     save_config_values,
     save_api_key,
 )
-from ftb_translater.format_guard import preserved_token_warnings
+from ftb_translater.format_guard import preserved_token_warnings, protect_text, restore_text
 from ftb_translater.paths import detect_source_mode, resolve_quests_dir
 from ftb_translater.snbt import dump_lang_snbt, parse_lang_snbt, write_lang_snbt
 from ftb_translater.translator import (
@@ -68,6 +68,23 @@ class TrackingTranslator:
         finally:
             with self.lock:
                 self.active -= 1
+
+
+class RecordingProtectedTranslator:
+    model = "deepseek-v4-flash"
+
+    def __init__(self):
+        self.seen_values: list[str] = []
+
+    def translate_batch(self, entries, style):
+        self.seen_values.extend(entries.values())
+        return {
+            key: value.replace("Defeat", "击败")
+            .replace("Ignis", "伊格尼斯")
+            .replace("Burning Arena", "燃烧竞技场")
+            .replace("in the Lava Dimension", "在熔岩维度")
+            for key, value in entries.items()
+        }
 
 
 class CoreTests(unittest.TestCase):
@@ -208,6 +225,31 @@ class CoreTests(unittest.TestCase):
     def test_format_guard_warns_for_lost_newline(self) -> None:
         self.assertTrue(preserved_token_warnings("Line one\nLine two", "第一行 第二行"))
 
+    def test_format_guard_allows_colour_segments_to_move(self) -> None:
+        source = "Defeat &cIgnis&r in the &cBurning Arena&r with &dAshes&r"
+        translated = "在&c燃烧竞技场&r中用&d灰烬&r击败&c伊格尼斯&r"
+
+        self.assertEqual(preserved_token_warnings(source, translated), [])
+
+    def test_format_guard_still_requires_non_colour_token_order(self) -> None:
+        source = "Use %s on <item:minecraft:stone>"
+        translated = "对<item:minecraft:stone>使用%s"
+
+        self.assertTrue(preserved_token_warnings(source, translated))
+
+    def test_format_guard_protects_ftb_macros_and_resource_paths(self) -> None:
+        source = "See {@pagebreak} and {image:ftb:textures/quests/mekanism/portal_frame.png width:100 height:100 align:center}"
+
+        protected, protections = protect_text(source)
+        self.assertNotIn("pagebreak", protected)
+        self.assertNotIn("portal_frame.png", protected)
+
+        translated = protected.replace("See", "查看")
+        restored = restore_text(translated, protections)
+        self.assertIn("{@pagebreak}", restored)
+        self.assertIn("{image:ftb:textures/quests/mekanism/portal_frame.png width:100 height:100 align:center}", restored)
+        self.assertEqual(preserved_token_warnings(source, restored), [])
+
     def test_translate_quests_lang_integration(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -274,6 +316,31 @@ class CoreTests(unittest.TestCase):
             output = parse_lang_snbt((lang / "zh_cn.snbt").read_text(encoding="utf-8"))
             self.assertEqual(output["desc"], source)
             self.assertTrue(report.warnings["desc"])
+
+    def test_translate_quests_lang_sends_protected_text_to_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            quests = root / "config" / "ftbquests" / "quests"
+            lang = quests / "lang"
+            lang.mkdir(parents=True)
+            source = "Defeat &cIgnis&r in the &cBurning Arena&r in the Lava Dimension."
+            write_lang_snbt(lang / "en_us.snbt", {"desc": source})
+            translator = RecordingProtectedTranslator()
+
+            report = translate_quests_lang(
+                quests,
+                api_key="unused",
+                batch_size=1,
+                translator=translator,
+            )
+
+            output = parse_lang_snbt((lang / "zh_cn.snbt").read_text(encoding="utf-8"))
+            self.assertEqual(output["desc"], "击败 &c伊格尼斯&r in the &c燃烧竞技场&r 在熔岩维度.")
+            self.assertEqual(report.warnings, {})
+            self.assertTrue(translator.seen_values)
+            self.assertNotIn("&c", translator.seen_values[0])
+            self.assertNotIn("&r", translator.seen_values[0])
+            self.assertIn("Ignis", translator.seen_values[0])
 
     def test_chapter_segments_extract_and_translate_auto(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -97,8 +97,11 @@ def translate_quests_lang(
 
     translated_values: OrderedDict[str, LangValue] = OrderedDict()
     pending: OrderedDict[str, str] = OrderedDict()
+    pending_sources: OrderedDict[str, str] = OrderedDict()
+    protections_by_key: dict[str, list[tuple[str, str]]] = {}
     cache_hits = 0
     warnings: dict[str, list[str]] = {}
+    failed_translations: dict[str, dict[str, str]] = {}
 
     for key, value in source_values.items():
         source_text = _lang_value_to_text(value)
@@ -107,7 +110,10 @@ def translate_quests_lang(
             translated_values[key] = _text_to_lang_value(cached, value)
             cache_hits += 1
         else:
-            pending[key] = source_text
+            protected_text, protections = protect_text(source_text)
+            pending[key] = protected_text
+            pending_sources[key] = source_text
+            protections_by_key[key] = protections
 
     _log.info("Cache hits: %d, pending translation: %d", cache_hits, len(pending))
 
@@ -135,15 +141,18 @@ def translate_quests_lang(
         if batch_result.error is not None:
             for key in batch:
                 failed_entries.append(f"{key}: {batch_result.error}")
-        for key, source_text in batch.items():
-            translated_text = result.get(key, source_text)
-            translated_text, token_warnings = _guard_translation(source_text, translated_text)
+        for key, protected_text in batch.items():
+            source_text = pending_sources[key]
+            translated_text = result.get(key, protected_text)
+            model_raw = translated_text
+            translated_text, token_warnings = _guard_translation(source_text, translated_text, protections_by_key[key])
             translated_values[key] = _text_to_lang_value(translated_text, source_values[key])
             if translated_text != source_text:
                 cache.set(source_text, model, "zh_cn", style, translated_text)
             if token_warnings:
                 _log.warning("Format token mismatch for key %r: %s", key, token_warnings)
                 warnings[key] = token_warnings
+                failed_translations[key] = {"source": source_text, "failed": restore_text(model_raw, protections_by_key[key])}
 
     ordered_output: OrderedDict[str, LangValue] = OrderedDict()
     for key in source_values:
@@ -188,6 +197,7 @@ def translate_quests_lang(
         cache_hits=cache_hits,
         failed_entries=failed_entries,
         warnings=warnings,
+        failed_translations=failed_translations,
     )
     report.save(quests_dir)
     if progress:
@@ -224,9 +234,12 @@ def translate_quests_chapters(
     _log.debug("Extracted %d total text segments from %d chapter files", len(all_segments), len(files))
 
     pending: OrderedDict[str, str] = OrderedDict()
+    pending_sources: OrderedDict[str, str] = OrderedDict()
+    protections_by_key: dict[str, list[tuple[str, str]]] = {}
     translations_by_file: dict[Path, dict[int, str]] = {path: {} for path in files}
     cache_hits = 0
     warnings: dict[str, list[str]] = {}
+    failed_translations: dict[str, dict[str, str]] = {}
 
     for segment in all_segments:
         cached = cache.get(segment.source_text, model, "zh_cn", style)
@@ -234,7 +247,10 @@ def translate_quests_chapters(
             translations_by_file[segment.path][segment.index] = cached
             cache_hits += 1
         else:
-            pending[segment.cache_id] = segment.source_text
+            protected_text, protections = protect_text(segment.source_text)
+            pending[segment.cache_id] = protected_text
+            pending_sources[segment.cache_id] = segment.source_text
+            protections_by_key[segment.cache_id] = protections
 
     _log.info("Cache hits: %d, pending translation: %d", cache_hits, len(pending))
 
@@ -262,16 +278,19 @@ def translate_quests_chapters(
         if batch_result.error is not None:
             for key in batch:
                 failed_entries.append(f"{key}: {batch_result.error}")
-        for cache_id, source_text in batch.items():
+        for cache_id, protected_text in batch.items():
             segment = segment_by_id[cache_id]
-            translated_text = result.get(cache_id, source_text)
-            translated_text, token_warnings = _guard_translation(source_text, translated_text)
+            source_text = pending_sources[cache_id]
+            translated_text = result.get(cache_id, protected_text)
+            model_raw = translated_text
+            translated_text, token_warnings = _guard_translation(source_text, translated_text, protections_by_key[cache_id])
             translations_by_file[segment.path][segment.index] = translated_text
             if translated_text != source_text:
                 cache.set(source_text, model, "zh_cn", style, translated_text)
             if token_warnings:
                 _log.warning("Format token mismatch for segment %r: %s", cache_id, token_warnings)
                 warnings[cache_id] = token_warnings
+                failed_translations[cache_id] = {"source": source_text, "failed": restore_text(model_raw, protections_by_key[cache_id])}
 
     msg = "Creating backup for chapters directory before overwrite."
     _log.info(msg)
@@ -306,6 +325,7 @@ def translate_quests_chapters(
         cache_hits=cache_hits,
         failed_entries=failed_entries,
         warnings=warnings,
+        failed_translations=failed_translations,
     )
     report.save(quests_dir)
     if progress:
@@ -498,14 +518,14 @@ def _auto_max_workers(batch_count: int, entry_count: int) -> int:
     return min(AUTO_MAX_WORKERS, batch_count)
 
 
-def _guard_translation(source_text: str, translated_text: str) -> tuple[str, list[str]]:
-    # Step 1: protect source (extract tokens, replace with placeholders)
-    protected, protections = protect_text(source_text)
-
-    # Step 2: restore tokens in the translated output
+def _guard_translation(
+    source_text: str,
+    translated_text: str,
+    protections: list[tuple[str, str]],
+) -> tuple[str, list[str]]:
+    # Restore the exact tokens that were removed before sending text to the model.
     restored = restore_text(translated_text, protections)
 
-    # Step 3: run the token-preservation check
     token_warnings = preserved_token_warnings(source_text, restored)
     if token_warnings:
         return source_text, [*token_warnings, "Unsafe translation discarded; source text preserved."]

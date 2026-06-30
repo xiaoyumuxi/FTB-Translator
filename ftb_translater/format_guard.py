@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import Counter
 from collections.abc import Sequence
 
 from ftb_translater.logger import get_logger
@@ -22,6 +23,15 @@ _FORMAT_PATTERN = re.compile(
 # Angle-bracket IDs  e.g. <item:minecraft:stone>, <tag:c:ingots/iron>
 _ANGLE_PATTERN = re.compile(r"<[^<>\n]+>")
 
+# FTB/quest text macros and embeds  e.g. {@pagebreak}, {image:ftb:textures/...}
+_BRACE_MACRO_PATTERN = re.compile(r"\{[@A-Za-z][^{}\n]*\}")
+
+# Resource identifiers / file paths that can appear outside brace macros.
+_RESOURCE_PATH_PATTERN = re.compile(
+    r"\b(?:[a-z0-9_.-]+:)?[a-z0-9_.-]+(?:/[a-z0-9_.-]+)+(?:\.[a-z0-9]+)?\b",
+    re.IGNORECASE,
+)
+
 # Escape sequences  \n \r \t \" \' \\
 _ESCAPE_PATTERN = re.compile(r"\\[nrt\"'\\]")
 
@@ -36,6 +46,8 @@ _FLAT_PATTERNS: list[re.Pattern[str]] = [
     _COLOR_PATTERN,
     _FORMAT_PATTERN,
     _ANGLE_PATTERN,
+    _BRACE_MACRO_PATTERN,
+    _RESOURCE_PATH_PATTERN,
     _ESCAPE_PATTERN,
     _URL_PATTERN,
     _HEX_PATTERN,
@@ -85,33 +97,41 @@ def preserved_token_warnings(source: str, translated: str) -> list[str]:
         if source.count(char) != translated.count(char):
             warnings.append(f"Control character count mismatch for {name}")
 
-    # 2. Token round-trip check
-    src_protected, src_protections = protect_text(source)
+    # 2. Token round-trip check.  Colour/style codes are allowed to move as
+    # complete segments because Chinese word order often moves highlighted
+    # phrases.  Non-colour tokens still require strict relative order.
+    _, src_protections = protect_text(source)
     tgt_restored = restore_text(translated, src_protections)
+    src_tokens = _extract_protected_tokens(source)
+    tgt_tokens = _extract_protected_tokens(tgt_restored)
 
-    # Every source token must appear in the translated output in the same
-    # relative order.  We check by re-protecting the restored output and
-    # comparing placeholder-for-placeholder.
-    tgt_reprotect, tgt_protections = protect_text(tgt_restored)
-
-    # Compare placeholders pairwise
-    if len(src_protections) != len(tgt_protections):
+    src_fixed = [token for token in src_tokens if not _is_movable_style_token(token)]
+    tgt_fixed = [token for token in tgt_tokens if not _is_movable_style_token(token)]
+    if len(src_fixed) != len(tgt_fixed):
         warnings.append(
-            f"Token count mismatch: {len(src_protections)} source vs "
-            f"{len(tgt_protections)} translated",
+            f"Non-colour token count mismatch: {len(src_fixed)} source vs "
+            f"{len(tgt_fixed)} translated",
         )
     else:
-        for (sp, so), (tp, to) in zip(src_protections, tgt_protections):
-            if so != to:
+        for source_token, translated_token in zip(src_fixed, tgt_fixed):
+            if source_token != translated_token:
                 warnings.append(
-                    f"Token mismatch: source={so!r} translated={to!r}",
+                    f"Non-colour token mismatch: source={source_token!r} translated={translated_token!r}",
                 )
 
-    # 3. Also check that source tokens still exist in translated
-    #    (catches placeholders the model may have dropped entirely)
-    for _, original in src_protections:
-        if original not in translated:
+    src_style = Counter(token for token in src_tokens if _is_movable_style_token(token))
+    tgt_style = Counter(token for token in tgt_tokens if _is_movable_style_token(token))
+    if src_style != tgt_style:
+        warnings.append(f"Colour/style token count mismatch: source={dict(src_style)} translated={dict(tgt_style)}")
+
+    # 3. Strict occurrence check catches dropped duplicate tokens as well as
+    # completely missing tokens.
+    missing = Counter(src_tokens) - Counter(tgt_tokens)
+    for original, count in sorted(missing.items()):
+        if count == 1:
             warnings.append(f"Missing token in translation: {original!r}")
+        else:
+            warnings.append(f"Missing token in translation: {original!r} x{count}")
 
     if warnings:
         _log.warning(
@@ -207,6 +227,56 @@ def _protect_flat_text(text: str) -> tuple[str, list[Protection]]:
             protections.insert(0, (ph, original))
             result = result[:match.start()] + ph + result[match.end():]
     return result, protections
+
+
+def _extract_protected_tokens(text: str) -> list[str]:
+    """Extract protected tokens in human-readable text order."""
+    stripped = text.strip()
+    if _looks_like_json(stripped):
+        try:
+            obj = json.loads(text)
+        except json.JSONDecodeError:
+            return _extract_flat_tokens(text)
+
+        tokens: list[str] = []
+
+        def _walk(node: object) -> None:
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    if key == "text" and isinstance(value, str):
+                        tokens.extend(_extract_flat_tokens(value))
+                    elif isinstance(value, (dict, list)):
+                        _walk(value)
+            elif isinstance(node, list):
+                for item in node:
+                    if isinstance(item, str):
+                        tokens.extend(_extract_flat_tokens(item))
+                    else:
+                        _walk(item)
+
+        _walk(obj)
+        return tokens
+    return _extract_flat_tokens(text)
+
+
+def _extract_flat_tokens(text: str) -> list[str]:
+    matches: list[tuple[int, int, int, str]] = []
+    for priority, pattern in enumerate(_FLAT_PATTERNS):
+        for match in pattern.finditer(text):
+            matches.append((match.start(), match.end(), priority, match.group()))
+
+    tokens: list[str] = []
+    occupied: list[tuple[int, int]] = []
+    for start, end, _priority, token in sorted(matches, key=lambda item: (item[0], item[2], item[1])):
+        if any(start < used_end and end > used_start for used_start, used_end in occupied):
+            continue
+        occupied.append((start, end))
+        tokens.append(token)
+    return tokens
+
+
+def _is_movable_style_token(token: str) -> bool:
+    return bool(_COLOR_PATTERN.fullmatch(token))
 
 
 def _contains_cjk(text: str) -> bool:

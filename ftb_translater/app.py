@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import queue
 import threading
+from collections import OrderedDict
 from pathlib import Path
 from tkinter import filedialog, messagebox
 
@@ -18,11 +19,13 @@ from ftb_translater.config import (
     load_config_values,
     save_config_values,
 )
-from ftb_translater.deepseek_client import DEFAULT_BASE_URL, DEFAULT_MODEL, DEFAULT_STYLE
+from ftb_translater.deepseek_client import DEFAULT_BASE_URL, DEFAULT_MODEL, DEFAULT_STYLE, DeepSeekTranslator
+from ftb_translater.format_guard import protect_text, restore_text, preserved_token_warnings
+from ftb_translater.report import TranslationReport
 from ftb_translater.chapters import count_chapter_segments
 from ftb_translater.logger import get_logger, setup_logging
 from ftb_translater.paths import detect_source_mode, resolve_quests_dir, source_lang_path
-from ftb_translater.snbt import load_lang_snbt
+from ftb_translater.snbt import load_lang_snbt, write_lang_snbt
 from ftb_translater.translator import AUTO_BATCH_MAX_ENTRIES, AUTO_MAX_WORKERS, estimate_batches, translate_quests_auto
 
 _log = get_logger(__name__)
@@ -34,8 +37,8 @@ class FtbTranslaterApp(ctk.CTk):
         setup_logging()
         _log.info("FTB Translater starting up")
         self.title("FTB Translater")
-        self.geometry("980x680")
-        self.minsize(900, 620)
+        self.geometry("1120x780")
+        self.minsize(980, 700)
 
         config_values = load_config_values()
         self.selected_dir = ctk.StringVar()
@@ -56,6 +59,8 @@ class FtbTranslaterApp(ctk.CTk):
         self._step_labels: dict[str, ctk.CTkLabel] = {}
         self._nav_buttons: dict[str, ctk.CTkButton] = {}
         self._run_settings: dict[str, object] = {}
+        self._review_report: TranslationReport | None = None
+        self._review_data: dict[str, dict] = {}
         self._build_ui()
         self._set_stage("idle")
         self.after(150, self._drain_queue)
@@ -224,12 +229,73 @@ class FtbTranslaterApp(ctk.CTk):
         )
         self.translate_button.grid(row=0, column=1, rowspan=2, sticky="e", padx=18, pady=18)
 
-        log_panel = self._panel(main, "运行日志", "这里会显示扫描、备份、翻译和写入过程。")
-        log_panel.grid(row=4, column=0, sticky="nsew")
+        bottom = ctk.CTkFrame(main, corner_radius=0, fg_color="transparent")
+        bottom.grid(row=4, column=0, sticky="nsew")
+        bottom.grid_columnconfigure(0, weight=1)
+        bottom.grid_rowconfigure(0, weight=1)
+
+        log_panel = self._panel(bottom, "运行日志", "这里会显示扫描、备份、翻译和写入过程。")
+        log_panel.grid(row=0, column=0, sticky="nsew")
         log_panel.grid_columnconfigure(0, weight=1)
         log_panel.grid_rowconfigure(2, weight=1)
         self.log = ctk.CTkTextbox(log_panel, height=170, corner_radius=10)
         self.log.grid(row=2, column=0, sticky="nsew", padx=18, pady=(0, 18))
+
+        review_panel = ctk.CTkFrame(
+            bottom, corner_radius=14, border_width=1,
+            fg_color=("#FFF7ED", "#1F1710"),
+            border_color=("#FDBA74", "#9A3412"),
+        )
+        review_panel.grid(row=1, column=0, sticky="nsew", pady=(12, 0))
+        review_panel.grid_columnconfigure(0, weight=1)
+        review_panel.grid_columnconfigure(1, weight=0)
+        review_panel.grid_rowconfigure(3, weight=1)
+        review_panel.grid_remove()
+        self.review_panel = review_panel
+
+        self._review_title = ctk.StringVar(value="检查翻译")
+        ctk.CTkLabel(
+            review_panel, textvariable=self._review_title, anchor="w",
+            font=ctk.CTkFont(size=16, weight="bold"),
+            text_color=("#9A3412", "#FED7AA"),
+        ).grid(row=0, column=0, sticky="ew", padx=18, pady=(16, 2))
+
+        self._review_badge = ctk.CTkLabel(
+            review_panel, text="", height=28, corner_radius=14, padx=12,
+            fg_color=("#FB923C", "#C2410C"), text_color="#FFFFFF",
+            font=ctk.CTkFont(size=12, weight="bold"),
+        )
+        self._review_badge.grid(row=0, column=1, sticky="e", padx=(0, 18), pady=(16, 2))
+
+        self._review_subtitle = ctk.CTkLabel(
+            review_panel, text="", anchor="w",
+            text_color=("#687386", "#AAB3C2"),
+            wraplength=760,
+        )
+        self._review_subtitle.grid(row=1, column=0, columnspan=2, sticky="ew", padx=18, pady=(0, 8))
+
+        action_bar = ctk.CTkFrame(review_panel, fg_color="transparent")
+        action_bar.grid(row=2, column=0, columnspan=2, sticky="ew", padx=18, pady=(0, 6))
+        action_bar.grid_columnconfigure(0, weight=1)
+        self._retranslate_all_btn = ctk.CTkButton(
+            action_bar, text="全部重新翻译", width=130, height=32,
+            command=self._retranslate_all_review,
+        )
+        self._retranslate_all_btn.grid(row=0, column=1, padx=(0, 6), sticky="e")
+        self._ignore_all_btn = ctk.CTkButton(
+            action_bar, text="全部忽略", width=100, height=32,
+            fg_color="#6B7280", hover_color="#4B5563",
+            command=self._ignore_all_review,
+        )
+        self._ignore_all_btn.grid(row=0, column=2, sticky="e")
+
+        self._review_scroll = ctk.CTkScrollableFrame(
+            review_panel, corner_radius=10, border_width=1,
+            fg_color=("#FFFFFF", "#111827"),
+            border_color=("#FED7AA", "#7C2D12"),
+        )
+        self._review_scroll.grid(row=3, column=0, columnspan=2, sticky="nsew", padx=18, pady=(0, 18))
+        self._review_scroll.grid_columnconfigure(0, weight=1)
 
         self._build_settings_view()
         self._show_view("workbench")
@@ -332,6 +398,343 @@ class FtbTranslaterApp(ctk.CTk):
             text_color=("#687386", "#AAB3C2"),
         ).grid(row=6, column=0, columnspan=2, sticky="ew", padx=18, pady=(0, 18))
 
+    def _show_review_entries(self) -> None:
+        for widget in self._review_scroll.winfo_children():
+            widget.destroy()
+        self._review_data.clear()
+
+        report = self._review_report
+        if report is None or not report.warnings:
+            self._hide_review_panel()
+            return
+
+        self.review_panel.grid()
+        self.review_panel.master.grid_rowconfigure(1, weight=1)
+        self._review_title.set(f"检查翻译  —  {len(report.warnings)} 条格式 token 告警")
+        self._review_badge.configure(text=f"待处理 {len(report.warnings)}")
+
+        entries = list(report.warnings.items())
+        self._review_subtitle.configure(
+            text="AI 翻译改变了格式 token 顺序，已被保留为原文。可手动编辑后保存，或点击重新翻译重试。"
+        )
+
+        for idx, (key, warning_list) in enumerate(entries):
+            ft = report.failed_translations.get(key, {})
+            source = ft.get("source", key)
+            failed = ft.get("failed", "")
+
+            card = ctk.CTkFrame(
+                self._review_scroll, corner_radius=10,
+                fg_color=("#FFFFFF", "#172033"),
+                border_width=1, border_color=("#E5E7EB", "#374151"),
+            )
+            card.grid(row=idx, column=0, sticky="ew", pady=(0, 12))
+            card.grid_columnconfigure(0, weight=1)
+            card.grid_columnconfigure(1, weight=1)
+
+            key_row = ctk.CTkFrame(card, fg_color="transparent")
+            key_row.grid(row=0, column=0, columnspan=2, sticky="ew", padx=14, pady=(10, 6))
+            key_row.grid_columnconfigure(0, weight=1)
+            ctk.CTkLabel(
+                key_row, text=key, anchor="w",
+                font=ctk.CTkFont(size=12, family="Consolas"),
+                text_color="#9CA3AF",
+            ).grid(row=0, column=0, sticky="ew")
+            ctk.CTkLabel(
+                key_row, text="格式保护拦截", height=24, corner_radius=12, padx=10,
+                fg_color=("#FEF3C7", "#78350F"), text_color=("#92400E", "#FDE68A"),
+                font=ctk.CTkFont(size=11, weight="bold"),
+            ).grid(row=0, column=1, sticky="e")
+
+            ctk.CTkLabel(
+                card, text="原文", anchor="w",
+                font=ctk.CTkFont(size=13, weight="bold"),
+                text_color=("#374151", "#D1D5DB"),
+            ).grid(row=1, column=0, sticky="w", padx=14, pady=(0, 2))
+            ctk.CTkLabel(
+                card, text="翻译（可编辑）", anchor="w",
+                font=ctk.CTkFont(size=13, weight="bold"),
+                text_color=("#374151", "#D1D5DB"),
+            ).grid(row=1, column=1, sticky="w", padx=14, pady=(0, 2))
+
+            src_tb = ctk.CTkTextbox(
+                card, height=110, corner_radius=8,
+                fg_color=("#F3F4F6", "#1F2937"),
+                border_width=1, border_color=("#E5E7EB", "#374151"),
+            )
+            src_tb.grid(row=2, column=0, sticky="nsew", padx=(14, 7), pady=(0, 4))
+            src_tb.insert("1.0", source)
+            src_tb.configure(state="disabled")
+
+            trans_tb = ctk.CTkTextbox(
+                card, height=110, corner_radius=8,
+                border_width=1, border_color=("#3B82F6", "#2563EB"),
+            )
+            trans_tb.grid(row=2, column=1, sticky="nsew", padx=(7, 14), pady=(0, 4))
+            trans_tb.insert("1.0", failed or source)
+
+            warn_text = "\n".join(f"\u26a0 {w}" for w in warning_list)
+            warn_box = ctk.CTkFrame(card, corner_radius=8, fg_color=("#FEF2F2", "#3F1D1D"))
+            warn_box.grid(row=3, column=0, columnspan=2, sticky="ew", padx=14, pady=(6, 4))
+            warn_box.grid_columnconfigure(0, weight=1)
+            ctk.CTkLabel(
+                warn_box, text=warn_text, anchor="w", wraplength=760,
+                text_color=("#B91C1C", "#FCA5A5"), font=ctk.CTkFont(size=11),
+                justify="left",
+            ).grid(row=0, column=0, sticky="ew", padx=10, pady=8)
+
+            status_lbl = ctk.CTkLabel(
+                card, text="", anchor="w",
+                text_color=("#5B6676", "#AAB3C2"), font=ctk.CTkFont(size=12),
+            )
+            status_lbl.grid(row=4, column=0, columnspan=2, sticky="ew", padx=14, pady=(2, 6))
+
+            btn_frame = ctk.CTkFrame(card, fg_color="transparent")
+            btn_frame.grid(row=5, column=0, columnspan=2, sticky="ew", padx=14, pady=(0, 10))
+            btn_frame.grid_columnconfigure(0, weight=1)
+
+            ctk.CTkButton(
+                btn_frame, text="保存", width=70, height=30,
+                command=lambda k=key, tb=trans_tb, sl=status_lbl:
+                    self._save_review_entry(k, tb, sl),
+            ).grid(row=0, column=1, padx=(0, 6), sticky="e")
+
+            retrans_btn = ctk.CTkButton(
+                btn_frame, text="重新翻译", width=90, height=30,
+                fg_color="#D97706", hover_color="#B45309",
+            )
+            retrans_btn.configure(
+                command=lambda rb=retrans_btn, k=key, s=source, tb=trans_tb, sl=status_lbl:
+                    self._retranslate_single(k, s, tb, sl, rb),
+            )
+            retrans_btn.grid(row=0, column=2, padx=(0, 6), sticky="e")
+
+            ctk.CTkButton(
+                btn_frame, text="忽略", width=70, height=30,
+                fg_color="#6B7280", hover_color="#4B5563",
+                command=lambda k=key, c=card: self._ignore_review_entry(k, c),
+            ).grid(row=0, column=3, sticky="e")
+
+            self._review_data[key] = {
+                "source": source,
+                "failed": failed,
+                "textbox": trans_tb,
+                "status_label": status_lbl,
+                "retrans_btn": retrans_btn,
+                "frame": card,
+            }
+
+    def _hide_review_panel(self) -> None:
+        for widget in self._review_scroll.winfo_children():
+            widget.destroy()
+        self._review_data.clear()
+        self.review_panel.grid_remove()
+        self.review_panel.master.grid_rowconfigure(1, weight=0)
+
+    def _save_review_entry(self, key: str, textbox: ctk.CTkTextbox, status_label: ctk.CTkLabel) -> None:
+        report = self._review_report
+        if report is None:
+            status_label.configure(text="错误：无翻译报告。")
+            return
+        new_text = textbox.get("1.0", "end").strip()
+        if not new_text:
+            status_label.configure(text="错误：翻译内容为空。")
+            return
+        try:
+            target = Path(report.target_file)
+            if not target.exists():
+                status_label.configure(text=f"错误：目标文件不存在 {target}")
+                return
+            if target.suffix == ".snbt":
+                values = load_lang_snbt(target)
+                values[key] = new_text
+                write_lang_snbt(target, values)
+            else:
+                status_label.configure(text="错误：暂不支持章节式保存。")
+                return
+            status_label.configure(text="已保存 \u2713")
+        except Exception as exc:
+            status_label.configure(text=f"保存失败：{exc}")
+
+    def _retranslate_single(
+        self, key: str, source: str,
+        textbox: ctk.CTkTextbox, status_label: ctk.CTkLabel,
+        button: ctk.CTkButton | None,
+    ) -> None:
+        api_key = self.api_key.get().strip()
+        if not api_key:
+            status_label.configure(text="错误：请先配置 API Key。")
+            return
+        if button:
+            button.configure(state="disabled", text="翻译中...")
+
+        def worker():
+            try:
+                translator = DeepSeekTranslator(
+                    api_key=self._run_settings.get("api_key", api_key),
+                    model=self._run_settings.get("model") or DEFAULT_MODEL,
+                    base_url=self._run_settings.get("base_url") or DEFAULT_BASE_URL,
+                )
+                protected_source, protections = protect_text(source)
+                batch = OrderedDict([(key, protected_source)])
+                result = translator.translate_batch(batch, style=self._run_settings.get("style") or DEFAULT_STYLE)
+                translated = result.get(key, protected_source)
+                restored = restore_text(translated, protections)
+                warnings = preserved_token_warnings(source, restored)
+                if warnings:
+                    self.after(0, lambda t=translated: self._on_retranslate_result(
+                        textbox, status_label, button, t,
+                        f"仍有 {len(warnings)} 个告警，可手动编辑后保存。",
+                    ))
+                else:
+                    self.after(0, lambda: self._on_retranslate_result(
+                        textbox, status_label, button, restored, "翻译成功 \u2713",
+                    ))
+            except Exception as exc:
+                self.after(0, lambda: self._on_retranslate_result(
+                    textbox, status_label, button, "",
+                    f"翻译失败：{exc}",
+                ))
+
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+
+    def _on_retranslate_result(
+        self,
+        textbox: ctk.CTkTextbox,
+        status_label: ctk.CTkLabel,
+        button: ctk.CTkButton | None,
+        text: str,
+        status: str,
+    ) -> None:
+        if text:
+            textbox.delete("1.0", "end")
+            textbox.insert("1.0", text)
+        status_label.configure(text=status)
+        if button:
+            button.configure(state="normal", text="重新翻译")
+
+    def _retranslate_all_review(self) -> None:
+        if not self._review_data:
+            return
+        api_key = self.api_key.get().strip()
+        if not api_key:
+            self._review_subtitle.configure(text="错误：请先配置 API Key。")
+            return
+        self._retranslate_all_btn.configure(state="disabled", text="翻译中...")
+        pending: list[tuple[str, str]] = []
+        for key, data in self._review_data.items():
+            pending.append((key, data["source"]))
+        total = len(pending)
+        self._review_subtitle.configure(text=f"正在逐条重新翻译 0/{total}。每条会独立处理，不会互相影响。")
+
+        def worker():
+            try:
+                translator = DeepSeekTranslator(
+                    api_key=self._run_settings.get("api_key") or api_key,
+                    model=self._run_settings.get("model") or DEFAULT_MODEL,
+                    base_url=self._run_settings.get("base_url") or DEFAULT_BASE_URL,
+                )
+            except Exception as exc:
+                self.after(0, lambda e=exc: self._on_retranslate_all_error(e))
+                return
+
+            ok = 0
+            warning_count = 0
+            failed = 0
+            for index, (key, source) in enumerate(pending, start=1):
+                self.after(0, lambda k=key: self._set_review_entry_status(k, "正在重新翻译..."))
+                try:
+                    protected_source, protections = protect_text(source)
+                    batch = OrderedDict([(key, protected_source)])
+                    result = translator.translate_batch(batch, style=self._run_settings.get("style") or DEFAULT_STYLE)
+                    translated = result.get(key, protected_source)
+                    restored = restore_text(translated, protections)
+                    warnings = preserved_token_warnings(source, restored)
+                    if warnings:
+                        warning_count += 1
+                        self.after(0, lambda k=key, t=translated, w=warnings:
+                            self._on_batch_retranslate(k, t, w))
+                    else:
+                        ok += 1
+                        self.after(0, lambda k=key, r=restored:
+                            self._on_batch_retranslate(k, r, []))
+                except Exception as exc:
+                    failed += 1
+                    self.after(0, lambda k=key, e=exc: self._on_batch_retranslate_error(k, e))
+                self.after(0, lambda i=index, o=ok, w=warning_count, f=failed:
+                    self._update_retranslate_all_progress(i, total, o, w, f))
+            self.after(0, lambda o=ok, w=warning_count, f=failed:
+                self._on_retranslate_all_done(o, w, f))
+
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+
+    def _set_review_entry_status(self, key: str, text: str) -> None:
+        data = self._review_data.get(key)
+        if data is None:
+            return
+        label = data.get("status_label")
+        if label:
+            label.configure(text=text)
+
+    def _on_batch_retranslate(self, key: str, text: str, warnings: list[str]) -> None:
+        data = self._review_data.get(key)
+        if data is None:
+            return
+        tb = data.get("textbox")
+        sl = data.get("status_label")
+        if tb:
+            tb.delete("1.0", "end")
+            tb.insert("1.0", text)
+        if sl:
+            if warnings:
+                sl.configure(text=f"API 已返回，但仍有 {len(warnings)} 个格式告警，可手动编辑后保存。")
+            else:
+                sl.configure(text="重新翻译成功，确认无误后点击保存。")
+
+    def _on_batch_retranslate_error(self, key: str, exc: Exception) -> None:
+        self._set_review_entry_status(key, f"API 重试失败：{exc}")
+
+    def _update_retranslate_all_progress(self, done: int, total: int, ok: int, warning_count: int, failed: int) -> None:
+        self._review_subtitle.configure(
+            text=f"正在逐条重新翻译 {done}/{total}。成功 {ok}，仍有格式告警 {warning_count}，API 失败 {failed}。"
+        )
+
+    def _on_retranslate_all_done(self, ok: int, warning_count: int, failed: int) -> None:
+        self._retranslate_all_btn.configure(state="normal", text="全部重新翻译")
+        self._review_subtitle.configure(
+            text=f"重新翻译完成：成功 {ok} 条，仍需人工处理 {warning_count} 条，API 失败 {failed} 条。成功项仍需确认后点击保存。"
+        )
+
+    def _on_retranslate_all_error(self, exc: Exception) -> None:
+        self._retranslate_all_btn.configure(state="normal", text="全部重新翻译")
+        self._review_subtitle.configure(text=f"无法开始全部重新翻译：{exc}")
+
+    def _ignore_review_entry(self, key: str, card: ctk.CTkFrame) -> None:
+        card.grid_remove()
+        self._review_data.pop(key, None)
+        if not self._review_data:
+            self._review_subtitle.configure(text="所有条目已处理。")
+            self._review_badge.configure(text="待处理 0")
+        else:
+            self._review_badge.configure(text=f"待处理 {len(self._review_data)}")
+            self._review_title.set(f"检查翻译  —  {len(self._review_data)} 条格式 token 告警")
+        self._refresh_review_layout()
+
+    def _refresh_review_layout(self) -> None:
+        for idx, data in enumerate(self._review_data.values()):
+            frame = data.get("frame")
+            if frame and frame.winfo_exists():
+                frame.grid(row=idx, column=0, sticky="ew", pady=(0, 12))
+
+    def _ignore_all_review(self) -> None:
+        for widget in self._review_scroll.winfo_children():
+            widget.destroy()
+        self._review_data.clear()
+        self._review_subtitle.configure(text="已忽略所有条目。")
+        self._review_badge.configure(text="待处理 0")
+
     def _panel(self, parent: ctk.CTkFrame, title: str, description: str) -> ctk.CTkFrame:
         panel = ctk.CTkFrame(parent, corner_radius=14, border_width=1, border_color=("#D8DEE8", "#262B33"))
         ctk.CTkLabel(panel, text=title, anchor="w", font=ctk.CTkFont(size=16, weight="bold")).grid(
@@ -343,11 +746,11 @@ class FtbTranslaterApp(ctk.CTk):
         return panel
 
     def _show_view(self, view: str) -> None:
+        self.workbench_frame.grid_remove()
+        self.settings_frame.grid_remove()
         if view == "settings":
-            self.workbench_frame.grid_remove()
             self.settings_frame.grid()
         else:
-            self.settings_frame.grid_remove()
             self.workbench_frame.grid()
             view = "workbench"
         self._set_nav_state(view)
@@ -453,6 +856,8 @@ class FtbTranslaterApp(ctk.CTk):
         self._save_settings()
 
     def _scan(self) -> None:
+        self._review_report = None
+        self._hide_review_panel()
         try:
             _log.info("Starting scan for: %s", self.selected_dir.get())
             batch_size = self._effective_batch_size()
@@ -534,6 +939,8 @@ class FtbTranslaterApp(ctk.CTk):
         }
         self.scan_button.configure(state="disabled")
         self.translate_button.configure(state="disabled")
+        self._review_report = None
+        self._hide_review_panel()
         self.progress.set(0)
         self.status.set("正在汉化...")
         self.progress_text.set("正在准备翻译任务...")
@@ -589,6 +996,12 @@ class FtbTranslaterApp(ctk.CTk):
                     self._log(f"完成：写入 {report.target_file}")
                     self._log(f"备份：{report.backup_dir}")
                     self._log(f"缓存命中：{report.cache_hits}，失败：{len(report.failed_entries)}")
+                    self._review_report = report
+                    if report.warnings:
+                        self._log(f"告警：{len(report.warnings)} 条翻译存在格式 token 问题。")
+                        self._show_review_entries()
+                    else:
+                        self._hide_review_panel()
                     self.scan_button.configure(state="normal")
                     self.translate_button.configure(state="normal")
                 elif kind == "log":

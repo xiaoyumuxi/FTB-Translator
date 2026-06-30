@@ -16,6 +16,7 @@ class TranslationReport:
     cache_hits: int
     failed_entries: list[str] = field(default_factory=list)
     warnings: dict[str, list[str]] = field(default_factory=dict)
+    failed_translations: dict[str, dict[str, str]] = field(default_factory=dict)
 
     def save(self, quests_dir: Path) -> Path:
         path = quests_dir / ".ftb-translater" / "report-latest.json"
@@ -34,4 +35,5 @@ class TranslationReport:
             "cache_hits": self.cache_hits,
             "failed_entries": self.failed_entries,
             "warnings": self.warnings,
+            "failed_translations": self.failed_translations,
         }
