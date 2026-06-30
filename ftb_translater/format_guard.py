@@ -134,6 +134,8 @@ def preserved_token_warnings(source: str, translated: str) -> list[str]:
     tgt_style = Counter(token for token in tgt_tokens if _is_movable_style_token(token))
     if src_style != tgt_style:
         warnings.append(f"Colour/style token count mismatch: source={dict(src_style)} translated={dict(tgt_style)}")
+    elif src_style:
+        warnings.extend(_colour_ast_warnings(source, tgt_restored))
 
     # 3. Strict occurrence check catches dropped duplicate tokens as well as
     # completely missing tokens.
@@ -304,6 +306,131 @@ def _extract_flat_tokens(text: str) -> list[str]:
 
 def _is_movable_style_token(token: str) -> bool:
     return bool(_COLOR_PATTERN.fullmatch(token))
+
+
+def _colour_ast_warnings(source: str, translated: str) -> list[str]:
+    """Validate legacy colour/style codes with a lightweight style AST.
+
+    Counter checks intentionally allow complete styled phrases to move.  This
+    second pass catches sequences that have the same tokens but impossible or
+    semantically different style structure, such as ``&rtext&c`` or changing
+    ``&c&l`` into ``&l&c``.
+    """
+    source_spans, source_anomalies = _extract_colour_ast(source)
+    translated_spans, translated_anomalies = _extract_colour_ast(translated)
+    warnings: list[str] = []
+
+    source_span_counts = Counter(source_spans)
+    translated_span_counts = Counter(translated_spans)
+    if source_span_counts != translated_span_counts:
+        warnings.append(
+            "Colour/style AST mismatch: "
+            f"source={_format_style_counter(source_span_counts)} "
+            f"translated={_format_style_counter(translated_span_counts)}",
+        )
+
+    extra_anomalies = Counter(translated_anomalies) - Counter(source_anomalies)
+    if extra_anomalies:
+        warnings.append(
+            "Colour/style AST issue: "
+            f"translated has {_format_anomaly_counter(extra_anomalies)}",
+        )
+
+    return warnings
+
+
+def _extract_colour_ast(text: str) -> tuple[list[tuple[str, ...]], list[str]]:
+    """Return styled text span signatures and syntax anomalies.
+
+    The "AST" here is intentionally small: each node is a styled text span
+    represented by the active legacy codes that apply to that text.
+    """
+    stripped = text.strip()
+    if _looks_like_json(stripped):
+        try:
+            obj = json.loads(text)
+        except json.JSONDecodeError:
+            return _extract_flat_colour_ast(text)
+
+        spans: list[tuple[str, ...]] = []
+        anomalies: list[str] = []
+
+        def _walk(node: object) -> None:
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    if key == "text" and isinstance(value, str):
+                        node_spans, node_anomalies = _extract_flat_colour_ast(value)
+                        spans.extend(node_spans)
+                        anomalies.extend(node_anomalies)
+                    elif isinstance(value, (dict, list)):
+                        _walk(value)
+            elif isinstance(node, list):
+                for item in node:
+                    if isinstance(item, str):
+                        node_spans, node_anomalies = _extract_flat_colour_ast(item)
+                        spans.extend(node_spans)
+                        anomalies.extend(node_anomalies)
+                    else:
+                        _walk(item)
+
+        _walk(obj)
+        return spans, anomalies
+    return _extract_flat_colour_ast(text)
+
+
+def _extract_flat_colour_ast(text: str) -> tuple[list[tuple[str, ...]], list[str]]:
+    spans: list[tuple[str, ...]] = []
+    anomalies: list[str] = []
+    active: list[str] = []
+    pos = 0
+    last_style_without_text: str | None = None
+
+    for match in _COLOR_PATTERN.finditer(text):
+        chunk = text[pos:match.start()]
+        if chunk and active:
+            spans.append(tuple(active))
+            last_style_without_text = None
+        elif chunk:
+            last_style_without_text = None
+
+        token = match.group()
+        code = token[1].lower()
+        if code == "r":
+            if not active:
+                anomalies.append("reset without active style")
+            active = []
+            last_style_without_text = None
+        elif _is_colour_code(code):
+            active = [token]
+            last_style_without_text = token
+        else:
+            if token not in active:
+                active.append(token)
+            last_style_without_text = token
+        pos = match.end()
+
+    tail = text[pos:]
+    if tail and active:
+        spans.append(tuple(active))
+    elif tail:
+        last_style_without_text = None
+
+    if last_style_without_text is not None:
+        anomalies.append("style code without styled text")
+
+    return spans, anomalies
+
+
+def _is_colour_code(code: str) -> bool:
+    return code in "0123456789abcdefz"
+
+
+def _format_style_counter(counter: Counter[tuple[str, ...]]) -> dict[str, int]:
+    return {"+".join(style): count for style, count in sorted(counter.items())}
+
+
+def _format_anomaly_counter(counter: Counter[str]) -> dict[str, int]:
+    return {anomaly: count for anomaly, count in sorted(counter.items())}
 
 
 def _remove_extra_style_tokens(source: str, translated: str) -> str:

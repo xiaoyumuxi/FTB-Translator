@@ -309,6 +309,22 @@ class CoreTests(unittest.TestCase):
 
         self.assertEqual(preserved_token_warnings(source, translated), [])
 
+    def test_format_guard_warns_for_invalid_colour_ast_order(self) -> None:
+        source = "Defeat &cIgnis&r"
+        translated = "击败 &r伊格尼斯&c"
+
+        warnings = preserved_token_warnings(source, translated)
+
+        self.assertTrue(any("Colour/style AST" in warning for warning in warnings))
+
+    def test_format_guard_warns_when_colour_modifier_ast_changes(self) -> None:
+        source = "&cRed &lBold&r"
+        translated = "&l加粗 &c红色&r"
+
+        warnings = preserved_token_warnings(source, translated)
+
+        self.assertTrue(any("Colour/style AST" in warning for warning in warnings))
+
     def test_format_guard_repairs_extra_colour_codes(self) -> None:
         source = "&fSpeak With The &dEcho of The Quartermaster"
         translated = "&f与&d军需官的回响&f对话"
