@@ -17,6 +17,10 @@ class TranslationReport:
     failed_entries: list[str] = field(default_factory=list)
     warnings: dict[str, list[str]] = field(default_factory=dict)
     failed_translations: dict[str, dict[str, str]] = field(default_factory=dict)
+    # Stored for in-app history. output_files intentionally stays out of report-latest.json
+    # because it can duplicate every translated chapter file.
+    mapping: dict[str, dict[str, dict[str, str]]] = field(default_factory=dict)
+    output_files: dict[str, str] = field(default_factory=dict)
 
     def save(self, quests_dir: Path) -> Path:
         path = quests_dir / ".ftb-translater" / "report-latest.json"
@@ -36,4 +40,5 @@ class TranslationReport:
             "failed_entries": self.failed_entries,
             "warnings": self.warnings,
             "failed_translations": self.failed_translations,
+            "mapping": self.mapping,
         }

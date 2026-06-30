@@ -1,4 +1,4 @@
-name: Build Desktop App
+name: CI/CD
 
 on:
   pull_request:
@@ -9,14 +9,67 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      run_live_e2e:
+        description: "Run live CurseForge/DeepSeek e2e tests"
+        required: false
+        default: false
+        type: boolean
+      live_deepseek_entries:
+        description: "Sample size for live DeepSeek e2e"
+        required: false
+        default: "12"
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
-  contents: write
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.11"
+  UV_LOCKED: "1"
+  UV_SYSTEM_PYTHON: "1"
 
 jobs:
-  build:
-    name: Build ${{ matrix.suffix }}
+  test:
+    name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+          - macos-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --dev --locked
+
+      - name: Run unit tests
+        run: uv run python -m tests.run_groups unit
+
+  package:
+    name: Package (${{ matrix.suffix }})
+    needs: test
+    runs-on: ${{ matrix.os }}
+    if: github.event_name != 'pull_request'
     strategy:
       fail-fast: false
       matrix:
@@ -33,17 +86,15 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install uv
-        run: python -m pip install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
 
-      - name: Sync project dependencies
-        run: |
-          uv sync --dev
-
-      - name: Run unit tests
-        run: uv run python -m tests.run_groups unit
+      - name: Sync dependencies
+        run: uv sync --dev --locked
 
       - name: Build Windows exe
         if: runner.os == 'Windows'
@@ -88,8 +139,69 @@ jobs:
             artifacts/FTB-Translater-macos.dmg
           ls -lh artifacts/FTB-Translater-macos.dmg
 
-      - name: Upload release asset
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FTB-Translater-${{ matrix.suffix }}
+          path: artifacts/*
+          if-no-files-found: error
+          retention-days: 14
+
+  live-e2e:
+    name: Live e2e
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && inputs.run_live_e2e
+    env:
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      FTB_TRANSLATER_CURSEFORGE_URL: ${{ secrets.FTB_TRANSLATER_CURSEFORGE_URL }}
+      FTB_TRANSLATER_LIVE_DEEPSEEK_ENTRIES: ${{ inputs.live_deepseek_entries }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --dev --locked
+
+      - name: Run full e2e tests
+        run: uv run python -m tests.run_groups e2e
+
+      - name: Upload e2e output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-e2e-output
+          path: .ftb-translater/e2e-runs/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  release:
+    name: Publish GitHub release
+    needs: package
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download package artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: Publish release assets
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/*
+          files: release-artifacts/*

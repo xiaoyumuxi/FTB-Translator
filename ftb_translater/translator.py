@@ -196,6 +196,14 @@ def translate_quests_lang(
     if failed_entries:
         _log.warning("Failed entries:\n%s", "\n".join(failed_entries))
 
+    mapping_data: dict[str, dict[str, str]] = {}
+    for key in source_values:
+        src_text = _lang_value_to_text(source_values[key])
+        tgt_text = _lang_value_to_text(translated_values[key])
+        mapping_data[key] = {"en": src_text, "zh": tgt_text}
+    # 用 lang/zh_cn.snbt 而不是 zh_cn.snbt,这样导出的 ZIP 解压后能直接覆盖整合包目录
+    relative_target = f"lang/{target_path.name}"
+
     report = TranslationReport(
         source_file=str(source_path),
         target_file=str(target_path),
@@ -206,6 +214,8 @@ def translate_quests_lang(
         failed_entries=failed_entries,
         warnings=warnings,
         failed_translations=failed_translations,
+        mapping={relative_target: mapping_data},
+        output_files={relative_target: target_path.read_text(encoding="utf-8")},
     )
     report.save(quests_dir)
     if progress:
@@ -327,6 +337,20 @@ def translate_quests_chapters(
     if failed_entries:
         _log.warning("Failed entries:\n%s", "\n".join(failed_entries))
 
+    mapping_by_file: dict[str, dict[str, dict[str, str]]] = {}
+    output_by_file: dict[str, str] = {}
+    for path, replacements in translations_by_file.items():
+        rel_name = f"chapters/{path.name}"
+        file_map: dict[str, dict[str, str]] = {}
+        for segment in segments_by_file[path]:
+            translated = replacements.get(segment.index, segment.source_text)
+            file_map[segment.cache_id] = {"en": segment.source_text, "zh": translated}
+        mapping_by_file[rel_name] = file_map
+        try:
+            output_by_file[rel_name] = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            _log.warning("Could not read chapter file %s for history: %s", path, exc)
+
     report = TranslationReport(
         source_file=str(quests_dir / "chapters"),
         target_file=str(quests_dir / "chapters"),
@@ -337,6 +361,8 @@ def translate_quests_chapters(
         failed_entries=failed_entries,
         warnings=warnings,
         failed_translations=failed_translations,
+        mapping=mapping_by_file,
+        output_files=output_by_file,
     )
     report.save(quests_dir)
     if progress:

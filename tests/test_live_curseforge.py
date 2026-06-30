@@ -35,7 +35,7 @@ class FakeTranslator:
 )
 class LiveCurseForgeDownloadTests(unittest.TestCase):
     def test_download_extract_and_translate_real_curseforge_modpack(self) -> None:
-        url = os.getenv(CURSEFORGE_URL_ENV, DEFAULT_CURSEFORGE_URL)
+        url = os.getenv(CURSEFORGE_URL_ENV) or DEFAULT_CURSEFORGE_URL
         max_bytes = _max_download_bytes()
 
         with tempfile.TemporaryDirectory() as tmp:

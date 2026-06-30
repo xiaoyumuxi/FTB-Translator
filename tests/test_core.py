@@ -23,7 +23,6 @@ from ftb_translater.config import (
     load_config_values,
     load_api_key,
     save_config_values,
-    save_api_key,
 )
 from ftb_translater.deepseek_client import DeepSeekTranslator
 from ftb_translater.format_guard import preserved_token_warnings, protect_text, restore_text
@@ -154,12 +153,80 @@ class CoreTests(unittest.TestCase):
 
             self.assertEqual(resolve_quests_dir(root), quests.resolve())
 
-    def test_env_save_and_load(self) -> None:
+    def test_legacy_env_load(self) -> None:
+        # load_api_key 现在仅用于读取旧 .env 进行迁移
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            save_api_key("sk-test", root)
-            self.assertEqual((root / ".env").read_text(encoding="utf-8").strip(), f"{ENV_KEY}=sk-test")
-            self.assertEqual(load_api_key(root), "sk-test")
+            (root / ".env").write_text(f"{ENV_KEY}=sk-legacy\n", encoding="utf-8")
+            self.assertEqual(load_api_key(root), "sk-legacy")
+
+    def test_migrate_api_key_from_env(self) -> None:
+        from ftb_translater import credential_store
+        from ftb_translater.config import migrate_api_key_from_env
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".env").write_text(
+                f"{ENV_KEY}=sk-old-key\n"
+                f"{BASE_URL_KEY}=https://keep.me\n"
+                "UNRELATED=stay\n",
+                encoding="utf-8",
+            )
+
+            saved: dict[str, str] = {}
+
+            def fake_save(key: str) -> None:
+                saved["key"] = key
+
+            def fake_load() -> str:
+                return saved.get("key", "")
+
+            with patch.object(credential_store, "save_api_key", fake_save), \
+                 patch.object(credential_store, "load_api_key", fake_load):
+                changed = migrate_api_key_from_env(root)
+                self.assertTrue(changed)
+                self.assertEqual(saved.get("key"), "sk-old-key")
+
+            remaining = (root / ".env").read_text(encoding="utf-8")
+            self.assertNotIn(f"{ENV_KEY}=", remaining)
+            self.assertIn(f"{BASE_URL_KEY}=https://keep.me", remaining)
+            self.assertIn("UNRELATED=stay", remaining)
+
+    def test_migrate_api_key_keeps_different_env_key_when_already_in_store(self) -> None:
+        from ftb_translater import credential_store
+        from ftb_translater.config import migrate_api_key_from_env
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".env").write_text(f"{ENV_KEY}=sk-stale\n", encoding="utf-8")
+
+            with patch.object(credential_store, "load_api_key", return_value="sk-existing"), \
+                 patch.object(credential_store, "save_api_key") as save_mock:
+                changed = migrate_api_key_from_env(root)
+                self.assertFalse(changed)
+                save_mock.assert_not_called()
+
+            # 如果 .env 是不同的 key,不能静默删除,留给用户人工确认。
+            self.assertIn(f"{ENV_KEY}=sk-stale", (root / ".env").read_text(encoding="utf-8"))
+
+    def test_migrate_api_key_strips_duplicate_env_key_when_already_in_store(self) -> None:
+        from ftb_translater import credential_store
+        from ftb_translater.config import migrate_api_key_from_env
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".env").write_text(f"{ENV_KEY}=sk-same\n", encoding="utf-8")
+
+            with patch.object(credential_store, "load_api_key", return_value="sk-same"), \
+                 patch.object(credential_store, "save_api_key") as save_mock:
+                changed = migrate_api_key_from_env(root)
+                self.assertFalse(changed)
+                save_mock.assert_not_called()
+
+            self.assertNotIn(f"{ENV_KEY}=", (root / ".env").read_text(encoding="utf-8"))
 
     def test_default_env_path_uses_config_dir_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -187,7 +254,8 @@ class CoreTests(unittest.TestCase):
                     },
                 ):
                     self.assertEqual(load_api_key(), "")
-                    self.assertEqual(load_config_values()[ENV_KEY], "")
+                    # API key 不再属于 APP_CONFIG_KEYS,所以 load_config_values 不会返回它
+                    self.assertNotIn(ENV_KEY, load_config_values())
             finally:
                 os.chdir(previous_cwd)
 
@@ -197,7 +265,6 @@ class CoreTests(unittest.TestCase):
             (root / ".env").write_text("UNRELATED=keep\n", encoding="utf-8")
             save_config_values(
                 {
-                    ENV_KEY: "sk-test",
                     BASE_URL_KEY: "https://api.example.test",
                     MODEL_KEY: "deepseek-test",
                     STYLE_KEY: "style",
@@ -209,13 +276,15 @@ class CoreTests(unittest.TestCase):
 
             text = (root / ".env").read_text(encoding="utf-8")
             self.assertIn("UNRELATED=keep", text)
+            # API key 不再写入 .env
+            self.assertNotIn(f"{ENV_KEY}=", text)
             values = load_config_values(root)
-            self.assertEqual(values[ENV_KEY], "sk-test")
             self.assertEqual(values[BASE_URL_KEY], "https://api.example.test")
             self.assertEqual(values[MODEL_KEY], "deepseek-test")
             self.assertEqual(values[STYLE_KEY], "style")
             self.assertEqual(values[BATCH_SIZE_KEY], "12")
             self.assertEqual(values[CONCURRENCY_KEY], "3")
+            self.assertNotIn(ENV_KEY, values)
 
     def test_cache_hit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -290,9 +359,17 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(report.total_entries, 2)
             self.assertEqual(report.cache_hits, 0)
             self.assertTrue(Path(report.backup_dir, "lang", "zh_cn.snbt").exists())
-            self.assertTrue(
-                json.loads((quests / ".ftb-translater" / "report-latest.json").read_text(encoding="utf-8"))
-            )
+            saved_report = json.loads((quests / ".ftb-translater" / "report-latest.json").read_text(encoding="utf-8"))
+            self.assertTrue(saved_report)
+
+            # 新增字段:mapping 和 output_files(用相对整合包根的路径,导出 ZIP 直接可用)
+            self.assertIn("lang/zh_cn.snbt", report.mapping)
+            self.assertEqual(report.mapping["lang/zh_cn.snbt"]["title"]["en"], "Welcome")
+            self.assertEqual(report.mapping["lang/zh_cn.snbt"]["title"]["zh"], "汉化:Welcome")
+            self.assertIn("lang/zh_cn.snbt", report.output_files)
+            self.assertIn("汉化:Welcome", report.output_files["lang/zh_cn.snbt"])
+            self.assertEqual(saved_report["mapping"]["lang/zh_cn.snbt"]["title"]["zh"], "汉化:Welcome")
+            self.assertNotIn("output_files", saved_report)
 
     def test_translate_quests_lang_runs_batches_concurrently(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

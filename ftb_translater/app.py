@@ -9,19 +9,20 @@ from typing import Literal, TypeAlias, TypedDict, cast
 
 import customtkinter as ctk
 
+from ftb_translater import credential_store
 from ftb_translater.config import (
     BASE_URL_KEY,
     BATCH_SIZE_KEY,
     CONCURRENCY_KEY,
-    ENV_KEY,
     MODEL_KEY,
     STYLE_KEY,
-    load_api_key,
     load_config_values,
+    migrate_api_key_from_env,
     save_config_values,
 )
 from ftb_translater.deepseek_client import DEFAULT_BASE_URL, DEFAULT_MODEL, DEFAULT_STYLE, DeepSeekTranslator
 from ftb_translater.format_guard import protect_text, restore_text, preserved_token_warnings
+from ftb_translater.history_db import FileRecord, HistoryDB, RunSummary
 from ftb_translater.report import TranslationReport
 from ftb_translater.chapters import count_chapter_segments, replace_chapter_segments
 from ftb_translater.logger import get_logger, setup_logging
@@ -56,6 +57,8 @@ _AppQueueItem: TypeAlias = (
     | tuple[Literal["log"], str]
     | tuple[Literal["done"], TranslationReport]
     | tuple[Literal["error"], Exception]
+    | tuple[Literal["history_saved"], int]
+    | tuple[Literal["history_save_failed"], str]
 )
 
 
@@ -68,9 +71,10 @@ class FtbTranslaterApp(ctk.CTk):
         self.geometry("1120x780")
         self.minsize(980, 700)
 
+        migrate_api_key_from_env()
         config_values = load_config_values()
         self.selected_dir = ctk.StringVar()
-        self.api_key = ctk.StringVar(value=config_values.get(ENV_KEY) or load_api_key())
+        self.api_key = ctk.StringVar(value=credential_store.load_api_key())
         self.base_url = ctk.StringVar(value=config_values.get(BASE_URL_KEY) or DEFAULT_BASE_URL)
         self.model = ctk.StringVar(value=config_values.get(MODEL_KEY) or DEFAULT_MODEL)
         self.style = ctk.StringVar(value=config_values.get(STYLE_KEY) or DEFAULT_STYLE)
@@ -80,7 +84,9 @@ class FtbTranslaterApp(ctk.CTk):
         self.summary = ctk.StringVar(value="未扫描")
         self.stage = ctk.StringVar(value="准备就绪")
         self.progress_text = ctk.StringVar(value="等待扫描")
-        self.settings_status = ctk.StringVar(value="API Key 会通过此界面保存和读取。")
+        self.settings_status = ctk.StringVar(
+            value=f"API Key 通过 {credential_store.storage_backend_label()} 保存。"
+        )
         self._quests_dir: Path | None = None
         self._queue: queue.Queue[_AppQueueItem] = queue.Queue()
         self._key_visible = False
@@ -89,6 +95,8 @@ class FtbTranslaterApp(ctk.CTk):
         self._run_settings: _RunSettings | None = None
         self._review_report: TranslationReport | None = None
         self._review_data: dict[str, _ReviewEntryData] = {}
+        self.history_db = HistoryDB()
+        self._history_cards: dict[int, ctk.CTkFrame] = {}
         self._build_ui()
         self._set_stage("idle")
         self.after(150, self._drain_queue)
@@ -132,6 +140,19 @@ class FtbTranslaterApp(ctk.CTk):
 
         right_bar = ctk.CTkFrame(topbar, fg_color="transparent")
         right_bar.grid(row=0, column=2, sticky="e", padx=24)
+        self._nav_buttons["history"] = ctk.CTkButton(
+            right_bar,
+            text="📚 历史",
+            width=72,
+            height=32,
+            corner_radius=8,
+            command=lambda: self._show_view("history"),
+            font=ctk.CTkFont(size=13),
+            fg_color=("#F3F4F6", "#21262D"),
+            hover_color=("#E5E7EB", "#30363D"),
+            text_color=("#374151", "#C9D1D9"),
+        )
+        self._nav_buttons["history"].grid(row=0, column=0, padx=(0, 8))
         self._nav_buttons["settings"] = ctk.CTkButton(
             right_bar,
             text="⚙ 设置",
@@ -144,7 +165,7 @@ class FtbTranslaterApp(ctk.CTk):
             hover_color=("#E5E7EB", "#30363D"),
             text_color=("#374151", "#C9D1D9"),
         )
-        self._nav_buttons["settings"].grid(row=0, column=0, padx=(0, 10))
+        self._nav_buttons["settings"].grid(row=0, column=1, padx=(0, 10))
         self.appearance_segment = ctk.CTkSegmentedButton(
             right_bar,
             values=["系统", "浅色", "深色"],
@@ -154,7 +175,7 @@ class FtbTranslaterApp(ctk.CTk):
             height=30,
             font=ctk.CTkFont(size=12),
         )
-        self.appearance_segment.grid(row=0, column=1)
+        self.appearance_segment.grid(row=0, column=2)
         self.appearance_segment.set("系统")
 
         main = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
@@ -367,6 +388,7 @@ class FtbTranslaterApp(ctk.CTk):
         self._review_scroll.grid_columnconfigure(0, weight=1)
 
         self._build_settings_view()
+        self._build_history_view()
         self._show_view("workbench")
 
     def _build_settings_view(self) -> None:
@@ -404,7 +426,11 @@ class FtbTranslaterApp(ctk.CTk):
         content.grid(row=1, column=0, sticky="nsew")
         content.grid_columnconfigure(0, weight=1)
 
-        api_panel = self._panel(content, "API Key", "用于调用翻译接口，保存后下次启动自动读取")
+        api_panel = self._panel(
+            content,
+            "API Key",
+            f"调用翻译接口的凭证,会保存到{credential_store.storage_backend_label()}",
+        )
         api_panel.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         api_panel.grid_columnconfigure(0, weight=1)
         self.key_entry = ctk.CTkEntry(
@@ -501,6 +527,234 @@ class FtbTranslaterApp(ctk.CTk):
             text_color=("#656D76", "#8B949E"),
             font=ctk.CTkFont(size=11),
         ).grid(row=6, column=0, columnspan=2, sticky="ew", padx=16, pady=(0, 14))
+
+    def _build_history_view(self) -> None:
+        history = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
+        history.grid(row=1, column=0, sticky="nsew", padx=32, pady=(20, 24))
+        history.grid_columnconfigure(0, weight=1)
+        history.grid_rowconfigure(1, weight=1)
+        self.history_frame = history
+
+        header = ctk.CTkFrame(history, fg_color="transparent")
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 16))
+        header.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            header, text="翻译历史", anchor="w",
+            font=ctk.CTkFont(size=24, weight="bold"),
+            text_color=("#1F2328", "#E6EDF3"),
+        ).grid(row=0, column=0, sticky="ew")
+
+        button_row = ctk.CTkFrame(header, fg_color="transparent")
+        button_row.grid(row=0, column=1, sticky="e")
+        ctk.CTkButton(
+            button_row, text="🔄 刷新", width=72, height=32, corner_radius=8,
+            command=self._refresh_history_list,
+            fg_color=("#F3F4F6", "#21262D"), hover_color=("#E5E7EB", "#30363D"),
+            text_color=("#374151", "#C9D1D9"),
+        ).grid(row=0, column=0, padx=(0, 8))
+        ctk.CTkButton(
+            button_row, text="← 返回工作台", width=110, height=32, corner_radius=8,
+            command=lambda: self._show_view("workbench"),
+            fg_color=("#F3F4F6", "#21262D"), hover_color=("#E5E7EB", "#30363D"),
+            text_color=("#374151", "#C9D1D9"),
+        ).grid(row=0, column=1)
+
+        ctk.CTkLabel(
+            header,
+            text="保存的汉化记录,可以导出 ZIP 分享给其他玩家,或者删除清理空间",
+            anchor="w",
+            text_color=("#656D76", "#8B949E"),
+            font=ctk.CTkFont(size=13),
+        ).grid(row=1, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+
+        self._history_list_frame = ctk.CTkScrollableFrame(
+            history, corner_radius=0, fg_color="transparent",
+        )
+        self._history_list_frame.grid(row=1, column=0, sticky="nsew")
+        self._history_list_frame.grid_columnconfigure(0, weight=1)
+
+        self._history_empty_label = ctk.CTkLabel(
+            self._history_list_frame,
+            text="暂无翻译历史。完成一次汉化后会自动出现在这里。",
+            text_color=("#656D76", "#8B949E"),
+            font=ctk.CTkFont(size=14),
+        )
+
+    def _refresh_history_list(self) -> None:
+        for widget in self._history_list_frame.winfo_children():
+            widget.destroy()
+        self._history_cards.clear()
+        runs = self.history_db.list_runs()
+        if not runs:
+            self._history_empty_label = ctk.CTkLabel(
+                self._history_list_frame,
+                text="暂无翻译历史。完成一次汉化后会自动出现在这里。",
+                text_color=("#656D76", "#8B949E"),
+                font=ctk.CTkFont(size=14),
+            )
+            self._history_empty_label.grid(row=0, column=0, pady=60)
+            return
+        for idx, summary in enumerate(runs):
+            self._build_history_card(idx, summary)
+
+    def _build_history_card(self, idx: int, summary: RunSummary) -> None:
+        card = ctk.CTkFrame(
+            self._history_list_frame, corner_radius=12, border_width=1,
+            fg_color=("#FFFFFF", "#161B22"),
+            border_color=("#D0D7DE", "#30363D"),
+        )
+        card.grid(row=idx, column=0, sticky="ew", pady=(0, 10))
+        card.grid_columnconfigure(0, weight=1)
+        self._history_cards[summary.id] = card
+
+        top_row = ctk.CTkFrame(card, fg_color="transparent")
+        top_row.grid(row=0, column=0, sticky="ew", padx=16, pady=(14, 4))
+        top_row.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            top_row,
+            text=f"{summary.pack_name or '未命名'} · #{summary.id}",
+            anchor="w",
+            font=ctk.CTkFont(size=15, weight="bold"),
+            text_color=("#1F2328", "#E6EDF3"),
+        ).grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(
+            top_row, text=summary.created_at, anchor="e",
+            text_color=("#656D76", "#8B949E"),
+            font=ctk.CTkFont(size=12),
+        ).grid(row=0, column=1, sticky="e")
+
+        mode_text = "lang 模式" if summary.mode == "lang" else "chapters 模式"
+        meta_text = (
+            f"{mode_text} · {summary.total_entries} 条 · {summary.model}"
+        )
+        ctk.CTkLabel(
+            card, text=meta_text, anchor="w",
+            text_color=("#374151", "#C9D1D9"),
+            font=ctk.CTkFont(size=12),
+        ).grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 2))
+
+        stats_text = (
+            f"成功 {summary.translated_entries} · "
+            f"失败 {summary.failed_count} · "
+            f"告警 {summary.warning_count} · "
+            f"缓存命中 {summary.cache_hits}"
+        )
+        ctk.CTkLabel(
+            card, text=stats_text, anchor="w",
+            text_color=("#656D76", "#8B949E"),
+            font=ctk.CTkFont(size=11),
+        ).grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 2))
+
+        path_text = summary.quests_dir
+        if len(path_text) > 90:
+            path_text = "..." + path_text[-87:]
+        ctk.CTkLabel(
+            card, text=path_text, anchor="w",
+            text_color=("#94A3B8", "#6E7681"),
+            font=ctk.CTkFont(size=11, family="Menlo"),
+        ).grid(row=3, column=0, sticky="ew", padx=16, pady=(0, 8))
+
+        btn_row = ctk.CTkFrame(card, fg_color="transparent")
+        btn_row.grid(row=4, column=0, sticky="ew", padx=16, pady=(0, 12))
+        btn_row.grid_columnconfigure(0, weight=1)
+        ctk.CTkButton(
+            btn_row, text="导出 ZIP", width=90, height=30, corner_radius=6,
+            fg_color=("#2563EB", "#2563EB"), hover_color=("#1D4ED8", "#1D4ED8"),
+            command=lambda sid=summary.id: self._export_history_zip(sid),
+        ).grid(row=0, column=1, padx=(0, 6), sticky="e")
+        ctk.CTkButton(
+            btn_row, text="查看", width=70, height=30, corner_radius=6,
+            fg_color=("#F3F4F6", "#21262D"), hover_color=("#E5E7EB", "#30363D"),
+            text_color=("#374151", "#C9D1D9"),
+            command=lambda sid=summary.id: self._show_history_detail(sid),
+        ).grid(row=0, column=2, padx=(0, 6), sticky="e")
+        ctk.CTkButton(
+            btn_row, text="删除", width=70, height=30, corner_radius=6,
+            fg_color=("#DC2626", "#991B1B"), hover_color=("#B91C1C", "#7F1D1D"),
+            command=lambda sid=summary.id: self._delete_history_run(sid),
+        ).grid(row=0, column=3, sticky="e")
+
+    def _export_history_zip(self, run_id: int) -> None:
+        summary = self.history_db.get_run(run_id)
+        if summary is None:
+            messagebox.showerror("导出失败", f"记录 #{run_id} 不存在。")
+            return
+        default_name = f"{summary.pack_name or 'ftb-translation'}-{summary.id}.zip"
+        dest = filedialog.asksaveasfilename(
+            title="导出翻译 ZIP",
+            defaultextension=".zip",
+            initialfile=default_name,
+            filetypes=[("ZIP 文件", "*.zip")],
+        )
+        if not dest:
+            return
+        try:
+            written = self.history_db.export_zip(run_id, Path(dest))
+            messagebox.showinfo("导出成功", f"已写入：\n{written}")
+            self._log(f"已导出历史 #{run_id} -> {written}")
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("导出失败", str(exc))
+            _log.error("Export failed: %s", exc, exc_info=True)
+
+    def _delete_history_run(self, run_id: int) -> None:
+        if not messagebox.askyesno("确认删除", f"确定要删除历史记录 #{run_id} 吗？此操作不可撤销。"):
+            return
+        try:
+            self.history_db.delete_run(run_id)
+            self._log(f"已删除历史 #{run_id}")
+            self._refresh_history_list()
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("删除失败", str(exc))
+
+    def _show_history_detail(self, run_id: int) -> None:
+        summary = self.history_db.get_run(run_id)
+        if summary is None:
+            messagebox.showerror("查看失败", f"记录 #{run_id} 不存在。")
+            return
+        files = self.history_db.get_files(run_id)
+
+        window = ctk.CTkToplevel(self)
+        window.title(f"历史 #{run_id} - {summary.pack_name or '未命名'}")
+        window.geometry("760x560")
+        window.grab_set()
+        window.grid_columnconfigure(0, weight=1)
+        window.grid_rowconfigure(1, weight=1)
+
+        meta_text = (
+            f"模式: {summary.mode}    模型: {summary.model}    创建于: {summary.created_at}\n"
+            f"总条目: {summary.total_entries}    成功: {summary.translated_entries}    "
+            f"失败: {summary.failed_count}    告警: {summary.warning_count}\n"
+            f"风格: {summary.style}\n"
+            f"路径: {summary.quests_dir}"
+        )
+        ctk.CTkLabel(
+            window, text=meta_text, anchor="w", justify="left",
+            font=ctk.CTkFont(size=12),
+            text_color=("#374151", "#C9D1D9"),
+        ).grid(row=0, column=0, sticky="ew", padx=16, pady=(14, 8))
+
+        textbox = ctk.CTkTextbox(
+            window, corner_radius=8,
+            font=ctk.CTkFont(size=12, family="Menlo"),
+            fg_color=("#F6F8FA", "#0D1117"),
+        )
+        textbox.grid(row=1, column=0, sticky="nsew", padx=16, pady=(0, 12))
+
+        for record in files:
+            textbox.insert("end", f"=== {record.filename} ({len(record.mapping)} 条) ===\n")
+            for idx, (key, pair) in enumerate(list(record.mapping.items())[:20]):
+                en = pair.get("en", "").replace("\n", " ⏎ ")
+                zh = pair.get("zh", "").replace("\n", " ⏎ ")
+                textbox.insert("end", f"  [{key}]\n    EN: {en[:120]}\n    ZH: {zh[:120]}\n")
+            if len(record.mapping) > 20:
+                textbox.insert("end", f"  ... 还有 {len(record.mapping) - 20} 条\n")
+            textbox.insert("end", "\n")
+        textbox.configure(state="disabled")
+
+        ctk.CTkButton(
+            window, text="关闭", width=80, height=32, corner_radius=8,
+            command=window.destroy,
+        ).grid(row=2, column=0, pady=(0, 14))
 
     def _show_review_entries(self) -> None:
         for widget in self._review_scroll.winfo_children():
@@ -915,8 +1169,12 @@ class FtbTranslaterApp(ctk.CTk):
     def _show_view(self, view: str) -> None:
         self.workbench_frame.grid_remove()
         self.settings_frame.grid_remove()
+        self.history_frame.grid_remove()
         if view == "settings":
             self.settings_frame.grid()
+        elif view == "history":
+            self.history_frame.grid()
+            self._refresh_history_list()
         else:
             self.workbench_frame.grid()
             view = "workbench"
@@ -995,9 +1253,9 @@ class FtbTranslaterApp(ctk.CTk):
             return
 
         self.style.set(self._current_style())
+        credential_backend = credential_store.save_api_key(self.api_key.get())
         save_config_values(
             {
-                ENV_KEY: self.api_key.get(),
                 BASE_URL_KEY: self.base_url.get() or DEFAULT_BASE_URL,
                 MODEL_KEY: self.model.get() or DEFAULT_MODEL,
                 STYLE_KEY: self.style.get() or DEFAULT_STYLE,
@@ -1005,7 +1263,9 @@ class FtbTranslaterApp(ctk.CTk):
                 CONCURRENCY_KEY: self.max_workers.get() or "auto",
             }
         )
-        self.settings_status.set("已保存全部设置。")
+        self.settings_status.set(
+            f"已保存全部设置。API Key 已存入 {credential_store.storage_backend_label(credential_backend)}。"
+        )
         _log.info("Saved app settings")
         self._log("已保存全部设置。")
 
@@ -1191,6 +1451,7 @@ class FtbTranslaterApp(ctk.CTk):
                     self._log(f"备份：{report.backup_dir}")
                     self._log(f"缓存命中：{report.cache_hits}，失败：{len(report.failed_entries)}")
                     self._review_report = report
+                    self._save_history(report)
                     if report.warnings or report.failed_entries:
                         self._log(f"告警：{len(report.warnings)} 条翻译存在格式 token 问题。")
                         if report.failed_entries:
@@ -1202,6 +1463,14 @@ class FtbTranslaterApp(ctk.CTk):
                     self.translate_button.configure(state="normal")
                 elif kind == "log":
                     self._log(str(payload))
+                elif kind == "history_saved":
+                    run_id = cast(int, payload)
+                    self._log(f"已保存到历史记录 #{run_id}")
+                    if getattr(self, "_history_list_frame", None) is not None \
+                            and self.history_frame.winfo_ismapped():
+                        self._refresh_history_list()
+                elif kind == "history_save_failed":
+                    self._log(f"历史记录保存失败：{payload}")
                 elif kind == "error":
                     exc = cast(Exception, payload)
                     self.status.set(str(exc))
@@ -1213,6 +1482,48 @@ class FtbTranslaterApp(ctk.CTk):
         except queue.Empty:
             pass
         self.after(150, self._drain_queue)
+
+    def _save_history(self, report: TranslationReport) -> None:
+        """在后台线程把翻译结果写入 SQLite,避免阻塞 GUI。"""
+        if not report.output_files:
+            return
+        settings = self._run_settings
+        quests_dir = self._quests_dir
+        if quests_dir is None or settings is None:
+            return
+        try:
+            mode = detect_source_mode(quests_dir)
+        except Exception:  # noqa: BLE001
+            mode = "lang" if report.target_file.endswith(".snbt") else "chapters"
+
+        files: list[FileRecord] = []
+        for filename, content in report.output_files.items():
+            mapping = report.mapping.get(filename, {})
+            files.append(FileRecord(filename=filename, mapping=mapping, output_content=content))
+
+        payload = {
+            "quests_dir": str(quests_dir),
+            "mode": mode,
+            "model": settings["model"],
+            "style": settings["style"],
+            "base_url": settings["base_url"],
+            "total_entries": report.total_entries,
+            "translated_entries": report.translated_entries,
+            "cache_hits": report.cache_hits,
+            "failed_count": len(report.failed_entries),
+            "warning_count": len(report.warnings),
+            "files": files,
+        }
+
+        def worker() -> None:
+            try:
+                run_id = self.history_db.insert_run(**payload)
+                self._queue.put(("history_saved", run_id))
+            except Exception as exc:  # noqa: BLE001
+                _log.error("Failed to save history: %s", exc, exc_info=True)
+                self._queue.put(("history_save_failed", str(exc)))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _log(self, text: str) -> None:
         """Log to both the GUI textbox and the file logger."""

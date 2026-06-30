@@ -20,8 +20,8 @@ STYLE_KEY = "FTB_TRANSLATER_STYLE"
 BATCH_SIZE_KEY = "FTB_TRANSLATER_BATCH_SIZE"
 CONCURRENCY_KEY = "FTB_TRANSLATER_CONCURRENCY"
 
+# API Key 现在通过 credential_store(keyring)管理,不再写入 .env
 APP_CONFIG_KEYS = (
-    ENV_KEY,
     BASE_URL_KEY,
     MODEL_KEY,
     STYLE_KEY,
@@ -37,6 +37,7 @@ def env_path(base_dir: Path | None = None) -> Path:
 
 
 def load_api_key(base_dir: Path | None = None) -> str:
+    """已废弃:仅用于从旧 .env 文件迁移读取。新代码应使用 credential_store。"""
     path = env_path(base_dir)
     _log.debug("Loading API key from %s", path)
     if dotenv_values is not None and path.exists():
@@ -49,7 +50,6 @@ def load_api_key(base_dir: Path | None = None) -> str:
         if value:
             _log.debug("API key loaded from raw app settings file")
             return value
-    _log.warning("No API key found in saved app settings")
     return ""
 
 
@@ -100,9 +100,60 @@ def save_config_values(values: dict[str, str], base_dir: Path | None = None) -> 
     _log.debug("App config saved successfully")
 
 
-def save_api_key(api_key: str, base_dir: Path | None = None) -> None:
-    save_config_values({ENV_KEY: api_key}, base_dir)
-    _log.debug("API key saved successfully")
+def save_api_key(api_key: str, base_dir: Path | None = None) -> str:
+    """转发到 credential_store。base_dir 参数仅为向后兼容保留,会被忽略。"""
+    from ftb_translater import credential_store
+
+    backend = credential_store.save_api_key(api_key)
+    _log.debug("API key saved via credential_store")
+    return backend
+
+
+def migrate_api_key_from_env(base_dir: Path | None = None) -> bool:
+    """把 .env 里的旧 API Key 迁移到 credential_store,迁移成功后从 .env 删除。
+
+    Returns True 如果完成了迁移。
+    """
+    from ftb_translater import credential_store
+
+    legacy_key = load_api_key(base_dir)
+    if not legacy_key:
+        return False
+
+    stored_key = credential_store.load_api_key()
+    if stored_key:
+        if stored_key == legacy_key:
+            _strip_api_key_from_env(base_dir)
+            _log.info("Removed duplicate API key from .env after credential migration")
+        else:
+            _log.warning(
+                "Legacy .env API key differs from credential store; keeping .env value for manual review"
+            )
+        return False
+
+    credential_store.save_api_key(legacy_key)
+    _strip_api_key_from_env(base_dir)
+    _log.info("Migrated API key from .env to credential store")
+    return True
+
+
+def _strip_api_key_from_env(base_dir: Path | None = None) -> None:
+    path = env_path(base_dir)
+    if not path.exists():
+        return
+    lines = path.read_text(encoding="utf-8").splitlines()
+    kept = []
+    changed = False
+    for line in lines:
+        stripped = line.strip()
+        if "=" in stripped and not stripped.startswith("#"):
+            key = stripped.split("=", 1)[0].strip()
+            if key == ENV_KEY:
+                changed = True
+                continue
+        kept.append(line)
+    if changed:
+        path.write_text("\n".join(kept).rstrip() + "\n", encoding="utf-8")
 
 
 def _read_env_file(path: Path) -> dict[str, str]:

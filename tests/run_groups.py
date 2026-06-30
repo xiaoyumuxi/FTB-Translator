@@ -12,7 +12,7 @@ def main() -> int:
     default_group = "e2e" if "e2e" in command_name or "full" in command_name else "unit"
     group = sys.argv[1] if len(sys.argv) > 1 else default_group
     if group in {"unit", "normal"}:
-        suite = unittest.defaultTestLoader.loadTestsFromName("tests.test_core")
+        suite = unittest.defaultTestLoader.discover("tests", pattern="test_*.py")
     elif group in {"e2e", "full"}:
         os.environ.setdefault("FTB_TRANSLATER_LIVE_TEST", "1")
         os.environ.setdefault("FTB_TRANSLATER_LIVE_DEEPSEEK", "1")

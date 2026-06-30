@@ -6,6 +6,7 @@ import unittest
 from collections import OrderedDict
 from pathlib import Path
 
+from ftb_translater import credential_store
 from ftb_translater.config import load_api_key
 from ftb_translater.paths import resolve_quests_dir, source_lang_path, target_lang_path
 from ftb_translater.snbt import LangValue, load_lang_snbt, write_lang_snbt
@@ -31,11 +32,16 @@ DEFAULT_LIVE_DEEPSEEK_ENTRIES = 12
 )
 class LiveDeepSeekEndToEndTests(unittest.TestCase):
     def test_download_extract_translate_and_write_with_real_deepseek(self) -> None:
-        api_key = load_api_key(Path.cwd())
+        # 优先从系统凭证读,fallback 到旧 .env(本地开发场景)、再 fallback 到环境变量
+        api_key = (
+            credential_store.load_api_key()
+            or load_api_key(Path.cwd())
+            or os.getenv("DEEPSEEK_API_KEY", "")
+        )
         if not api_key:
             self.skipTest("DEEPSEEK_API_KEY is not configured")
 
-        url = os.getenv(CURSEFORGE_URL_ENV, DEFAULT_CURSEFORGE_URL)
+        url = os.getenv(CURSEFORGE_URL_ENV) or DEFAULT_CURSEFORGE_URL
         sample_size = _sample_size()
 
         root, cleanup = _working_root()

@@ -5,6 +5,7 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .ftb-translater/
+history.sqlite3
 *.egg-info/
 build/
 dist/
