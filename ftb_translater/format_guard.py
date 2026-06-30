@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from collections import Counter
-from collections.abc import Sequence
 
 from ftb_translater.logger import get_logger
 
@@ -146,6 +146,7 @@ def preserved_token_warnings(source: str, translated: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 _PLACEHOLDER_COUNTER = 0
+_PLACEHOLDER_LOCK = threading.Lock()
 
 
 def _next_placeholder() -> str:
@@ -155,14 +156,16 @@ def _next_placeholder() -> str:
     model clearly sees an opaque token to preserve verbatim.
     """
     global _PLACEHOLDER_COUNTER
-    ph = f"\u27e8P_{_PLACEHOLDER_COUNTER}\u27e9"
-    _PLACEHOLDER_COUNTER += 1
+    with _PLACEHOLDER_LOCK:
+        ph = f"\u27e8P_{_PLACEHOLDER_COUNTER}\u27e9"
+        _PLACEHOLDER_COUNTER += 1
     return ph
 
 
 def _reset_counter() -> None:
     global _PLACEHOLDER_COUNTER
-    _PLACEHOLDER_COUNTER = 0
+    with _PLACEHOLDER_LOCK:
+        _PLACEHOLDER_COUNTER = 0
 
 
 def _looks_like_json(text: str) -> bool:
@@ -277,14 +280,3 @@ def _extract_flat_tokens(text: str) -> list[str]:
 
 def _is_movable_style_token(token: str) -> bool:
     return bool(_COLOR_PATTERN.fullmatch(token))
-
-
-def _contains_cjk(text: str) -> bool:
-    for ch in text:
-        if '\u4e00' <= ch <= '\u9fff' or '\u3400' <= ch <= '\u4dbf':
-            return True
-    return False
-
-
-def _normalize(tokens: Sequence[str]) -> list[str]:
-    return sorted(tokens)
