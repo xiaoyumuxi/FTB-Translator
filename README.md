@@ -1,61 +1,129 @@
 # FTB Translater
 
-用于汉化现代 FTB Quests 任务文本的纯 Rust + Tauri 桌面工具。目前固定支持 `en_us → zh_cn`，翻译接口兼容 DeepSeek Chat Completions API。
+用于汉化现代 FTB Quests 任务文本的桌面工具，基于 Rust + Tauri 构建，调用 DeepSeek Chat Completions API 完成翻译。固定翻译方向：`en_us → zh_cn`。
 
 ## 功能
 
-- 支持 `config/ftbquests/quests/lang/en_us.snbt`
-- 支持 `config/ftbquests/quests/chapters/*.snbt`
-- 自动识别整合包、config、quests、lang 或 chapters 目录
-- 写入前自动备份原始 `lang` 或 `chapters` 目录
-- 自动批处理与并发 DeepSeek 请求
-- 保护颜色码、占位符、资源 ID、宏、URL、转义序列和换行
-- 格式检查失败时保留原文，支持在结果页人工修正
+- 支持两种模式：语言文件（`lang/en_us.snbt`）和章节文件（`chapters/*.snbt`）
+- 自动识别整合包目录结构，无需手动定位文件
+- 翻译前自动备份原始文件
+- 批量并发调用 API，可调节批大小与并发数
 - 翻译缓存、JSON 报告、SQLite 历史与 ZIP 导出
-- API Key 存入 macOS 钥匙串、Windows 凭据管理器或 Linux Secret Service
-- 浅色/深色主题和响应式桌面布局
+- 格式安全保护 + 人工修正页（见下方原理）
+- API Key 存入系统密钥管理器（macOS 钥匙串 / Windows 凭据管理器 / Linux Secret Service）
+- 浅色/深色主题，响应式桌面布局
+- 纯 Rust，运行时不依赖 Python 或任何 sidecar
 
-项目不依赖 Python，也不会在运行时启动 sidecar 或外部解释器。
+## 工作原理
+
+### 1. 文件解析
+
+工具支持两种文件格式，分别对应 FTB Quests 的两种任务书结构：
+
+- **lang 模式**：解析 `lang/en_us.snbt`，这是一个类 JSON 的 SNBT 格式文件，值可以是字符串或字符串数组（多行描述）。工具自己实现了 SNBT 解析器（`snbt.rs`），保留键的原始顺序，写出时也生成合法 SNBT。
+- **chapters 模式**：遍历 `chapters/*.snbt`，从每个章节文件中提取可翻译的字符串字段（任务标题、描述等）。
+
+### 2. Token 保护
+
+翻译前，每条原文会经过一道**占位符替换**流程（`core.rs::protect`）：
+
+用正则匹配以下模式，将它们替换为 `⟨P_0⟩`、`⟨P_1⟩`…… 形式的不透明占位符：
+
+| 类型 | 示例 |
+|------|------|
+| Minecraft 颜色/格式码 | `&e`、`§6`、`§k` |
+| printf 格式占位符 | `%s`、`%1$d` |
+| 尖括号标签 | `<item:minecraft:stone>` |
+| 花括号宏 | `{@player}`、`{amount}` |
+| 资源/路径标识符 | `assets/mod/textures/a.png`、`kubejs:items/foo` |
+| 转义序列 | `\n`、`\t`、`\\` |
+| URL | `https://...` |
+| 十六进制颜色 | `#FF5733` |
+
+保护后的文本只包含自然语言和占位符，例如：
+
+```
+Use &eGold Ingot&r on <item:minecraft:gold_ingot>
+→ Use ⟨P_0⟩Gold Ingot⟨P_1⟩ on ⟨P_2⟩
+```
+
+被保护的 token 列表与原文一起保存，翻译后用于恢复。
+
+### 3. 批量并发翻译
+
+待翻译条目按 `batch_size`（默认 25）分批，多批同时以最多 `concurrency`（默认 6，上限 12）个并发请求发送给 DeepSeek。
+
+每批以 JSON 对象形式发送，键是条目 ID，值是保护后的文本。模型被要求：
+- 保持键集合不变
+- 不修改任何 `⟨P_N⟩` 占位符
+- 返回同结构的 JSON 对象
+
+请求失败时最多重试 3 次，间隔递增。整批失败时，该批所有条目回退为原文。
+
+### 4. Token 恢复与校验
+
+API 返回后，每条译文经过两步处理：
+
+**恢复**：将 `⟨P_N⟩` 替换回对应的原始 token。
+
+**校验**（`core.rs::warnings`）：对恢复后的译文与原文做以下比较：
+- 换行、回车、制表符数量是否一致
+- 保护 token 集合（排序后）是否完全一致——即没有缺失、没有多余
+- 如果原文是 JSON 文本组件，校验译文的 JSON 结构（除 `"text"` 字段外的键和类型）是否不变
+
+**校验失败**：该条译文**不写入**，原文被保留，条目进入「人工修正」列表。校验通过的译文才写入文件并存入缓存。
+
+### 5. 翻译缓存
+
+每条成功通过校验的翻译以 SHA-256 散列为键存入 `cache.json`。散列输入包含原文、模型名和风格提示，保证不同模型/风格之间缓存不复用。下次翻译同一整合包时，命中缓存的条目直接跳过 API 请求。
+
+### 6. 写回与备份
+
+写入前先将原始 `lang` 或 `chapters` 目录整体备份到 `.ftb-translater/backups/<时间戳>/`。
+
+- lang 模式：写出 `lang/zh_cn.snbt`，写前再次解析验证格式合法。
+- chapters 模式：按原文件路径就地修改各章节文件中的对应字段。
+
+---
+
+## 数据位置
+
+应用设置和历史数据库保存到系统应用数据目录（`AppData`/`Application Support`/`~/.local/share`）。
+
+每个任务书的运行数据保存在整合包目录内：
+
+```
+config/ftbquests/quests/.ftb-translater/
+├── cache.json               # 翻译缓存（以 SHA-256 为键）
+├── report-latest.json       # 最近一次运行的完整报告
+└── backups/YYYYMMDD-HHMMSS/ # 翻译前的自动备份
+```
+
+---
 
 ## 开发环境
 
+依赖：
+
 - Node.js 20+
 - Rust stable
-- Tauri 2 对应的系统依赖
+- Tauri 2 对应的系统依赖（[参考官方文档](https://tauri.app/start/prerequisites/)）
 
-安装依赖：
+安装与启动：
 
 ```bash
 npm install
-```
-
-启动开发版：
-
-```bash
 npm run tauri dev
 ```
 
 ## 测试与构建
 
 ```bash
-npm run build
+# 单元测试
 cargo test --manifest-path src-tauri/Cargo.toml
+
+# 生产构建
 npm run tauri -- build
 ```
 
 构建产物位于 `src-tauri/target/release/bundle/`。
-
-## 数据位置
-
-应用设置和 `history.sqlite3` 保存到系统应用数据目录。每个任务书自己的运行数据保存在：
-
-```text
-config/ftbquests/quests/.ftb-translater/
-├── cache.json
-├── report-latest.json
-└── backups/YYYYMMDD-HHMMSS/
-```
-
-## 翻译安全
-
-程序会先将 Minecraft 格式码和资源标识替换成不可翻译占位符，再提交模型。译文返回后恢复原始 token，并比较控制字符与 token 集合。发现缺失、增加或变化时，该条译文不会写入，源文本会被保留并进入人工检查列表。

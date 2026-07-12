@@ -8,5 +8,16 @@
     "windows": [{ "title": "FTB Translater", "width": 1240, "height": 820, "minWidth": 940, "minHeight": 680, "decorations": true, "transparent": false }],
     "security": { "csp": null }
   },
-  "bundle": { "active": true, "targets": "all", "shortDescription": "FTB Quests 任务书汉化工具" }
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "shortDescription": "FTB Quests 任务书汉化工具",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
 }
