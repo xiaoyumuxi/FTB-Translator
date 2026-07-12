@@ -57,8 +57,8 @@ fn quote(s: &str, q: char) -> String {
 }
 pub fn extract(path: &Path) -> Result<Vec<Segment>, String> {
     let text = fs::read_to_string(path).map_err(|e| e.to_string())?;
-    let re=Regex::new(r#"(?s)(?:\b(title|subtitle|description|text|name)|[\"'](title|subtitle|description|text|name)[\"'])\s*:\s*(\[[^\]]*\]|\"(?:\\.|[^\"])*\"|'(?:\\.|[^'])*')"#).unwrap();
-    let strings = Regex::new(r#"\"((?:\\.|[^\"])*)\"|'((?:\\.|[^'])*)'"#).unwrap();
+    let re=Regex::new(r#"(?s)(?:\b(title|subtitle|description|text|name)|["'](title|subtitle|description|text|name)["'])\s*:\s*(\[[^\]]*]|"(?:\\.|[^"])*"|'(?:\\.|[^'])*')"#).unwrap();
+    let strings = Regex::new(r#""((?:\\.|[^"])*)"|'((?:\\.|[^'])*)'"#).unwrap();
     let mut out = vec![];
     for cap in re.captures_iter(&text) {
         let match_start = cap.get(0).unwrap().start();
