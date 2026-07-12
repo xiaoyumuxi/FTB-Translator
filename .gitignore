@@ -1,12 +1,6 @@
-.env
-.venv/
 .idea/
-__pycache__/
-*.py[cod]
-.pytest_cache/
 .ftb-translater/
 history.sqlite3
-*.egg-info/
-build/
 dist/
-*.spec
+node_modules/
+src-tauri/target/
