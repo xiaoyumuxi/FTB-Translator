@@ -9,19 +9,29 @@ import "./styles.css";
 type View = "workbench" | "history" | "settings";
 type Stage = "idle" | "scanned" | "running" | "done" | "error";
 type Provider = "openai_compatible"|"deepl"|"google_web"|"deepl_web";
-type SettingsData = { api_key:string; has_api_key:boolean; credential_backend:string; provider:Provider; base_url:string; model:string; style:string; batch_size:string; concurrency:string };
+type SettingsData = { api_key:string; api_key_changed:boolean; has_api_key:boolean; credential_backend:string; provider:Provider; base_url:string; model:string; style:string; batch_size:string; concurrency:string; glossary_enabled:boolean; glossary_path:string };
 type ScanResult = { quests_dir:string; pack_name:string; mode:"lang"|"chapters"; mode_label:string; source:string; entry_count:number; file_count:number; estimated_batches:number };
 type Report = { source_file:string; target_file:string; backup_dir:string; total_entries:number; translated_entries:number; cache_hits:number; failed_entries:string[]; warnings:Record<string,string[]>; failed_translations:Record<string,{source:string;failed:string;error?:string}> };
 type Run = { id:number; pack_name:string; quests_dir:string; mode:string; model:string; style:string; total_entries:number; translated_entries:number; cache_hits:number; failed_count:number; warning_count:number; created_at:string };
 type TranslationEvent = { type:"progress"|"log"|"done"|"error"; stage?:string; done?:number; total?:number; message?:string; report?:Report; run_id?:number };
 
-const providerOptions:Record<Provider,{label:string;base_url:string;model:string;needsKey:boolean}>={
-  openai_compatible:{label:"OpenAI 兼容接口",base_url:"https://api.deepseek.com",model:"deepseek-chat",needsKey:true},
-  deepl:{label:"DeepL 翻译 API",base_url:"https://api-free.deepl.com",model:"deepl",needsKey:true},
-  google_web:{label:"Google 网页翻译（实验性）",base_url:"https://translate.googleapis.com",model:"google-web",needsKey:false},
-  deepl_web:{label:"DeepL 网页翻译（实验性）",base_url:"https://oneshot-free.www.deepl.com",model:"deepl-web",needsKey:false},
+type ProviderPreset = {
+  label:string;
+  description:string;
+  base_url:string;
+  model:string;
+  credentialLabel?:string;
+  supportsGlossary:boolean;
+  supportsTaskParameters:boolean;
+  configuration:"none"|"deepl"|"openai";
 };
-const defaults: SettingsData = { api_key:"", has_api_key:false, credential_backend:"系统凭证管理器", provider:"openai_compatible", base_url:"https://api.deepseek.com", model:"deepseek-chat", style:"准确、自然地翻译为简体中文，保留 Minecraft 与模组专有名词。", batch_size:"auto", concurrency:"auto" };
+const providerOptions:Record<Provider,ProviderPreset>={
+  google_web:{label:"Google 网页翻译（默认）",description:"无需 API Key，使用内置的大批次、低并发策略。",base_url:"https://translate.googleapis.com",model:"google-web",supportsGlossary:false,supportsTaskParameters:false,configuration:"none"},
+  deepl_web:{label:"DeepL 网页翻译（实验性）",description:"无需 API Key，使用匿名网页接口与内置安全参数。",base_url:"https://oneshot-free.www.deepl.com",model:"deepl-web",supportsGlossary:false,supportsTaskParameters:false,configuration:"none"},
+  deepl:{label:"DeepL 翻译 API",description:"使用 DeepL 官方 API，可配置认证密钥、接口地址和任务参数。",base_url:"https://api-free.deepl.com",model:"deepl",credentialLabel:"DeepL Authentication Key",supportsGlossary:true,supportsTaskParameters:true,configuration:"deepl"},
+  openai_compatible:{label:"DeepSeek / OpenAI 兼容",description:"可配置 API Key、兼容接口、模型、翻译要求和任务参数。",base_url:"https://api.deepseek.com",model:"deepseek-chat",credentialLabel:"API Key",supportsGlossary:true,supportsTaskParameters:true,configuration:"openai"},
+};
+const defaults: SettingsData = { api_key:"", api_key_changed:false, has_api_key:false, credential_backend:"系统凭证管理器", provider:"google_web", base_url:"https://translate.googleapis.com", model:"google-web", style:"准确、自然地翻译为简体中文，保留 Minecraft 与模组专有名词。", batch_size:"auto", concurrency:"auto", glossary_enabled:false, glossary_path:"" };
 
 async function call<T>(command:string, payload:Record<string,unknown>={}) { return invoke<T>("bridge", { command, payload }); }
 
@@ -38,7 +48,7 @@ function App() {
   const [toast,setToast]=useState(""); const [confirm,setConfirm]=useState(false);
 
   useEffect(()=>{ document.documentElement.dataset.theme=theme; localStorage.theme=theme; },[theme]);
-  useEffect(()=>{ call<SettingsData>("settings").then(setSettings).catch(e=>notify(String(e))); },[]);
+  useEffect(()=>{ call<SettingsData>("settings").then(value=>setSettings({...value,api_key:"",api_key_changed:false})).catch(e=>notify(String(e))); },[]);
   useEffect(()=>{ const unlisten=listen<TranslationEvent>("translation-event",({payload:e})=>{
     if(e.type==="log"&&e.message) setLogs(v=>[...v.slice(-99),e.message!]);
     if(e.type==="progress") { setProgress(e.total?Math.min(100,Math.round((e.done||0)/e.total*100)):100); }
@@ -52,8 +62,8 @@ function App() {
   async function chooseFolder(){ const value=await open({directory:true,multiple:false,title:"选择整合包或 FTB Quests 目录"}); if(typeof value==="string"){setSelectedPath(value); await doScan(value)} }
   async function doScan(path=selectedPath){ if(!path.trim())return notify("请先选择整合包目录"); setBusy(true); setReport(null); try { const result=await call<ScanResult>("scan",{path,batch_size:settings.batch_size}); setScan(result); setSelectedPath(result.quests_dir); setStage("scanned"); setProgress(0); setLogs([`已找到 ${result.entry_count} 条可翻译文本。`,`源目录：${result.source}`]); } catch(e){setStage("error");notify(String(e))} finally{setBusy(false)} }
   async function beginTranslation(){setConfirm(false);if(!scan)return;setBusy(true);setStage("running");setProgress(0);setLogs(["正在启动安全翻译任务…"]);try{await invoke("start_translation",{payload:{quests_dir:scan.quests_dir,...settings}})}catch(e){setBusy(false);setStage("error");notify(String(e))}}
-  async function saveSettings(){try{const r=await call<{credential_backend:string}>("save-settings",settings);setSettings(v=>({...v,has_api_key:!!v.api_key,credential_backend:r.credential_backend}));notify("设置已保存")}catch(e){notify(String(e))}}
-  async function changeProvider(provider:Provider){const preset=providerOptions[provider];let api_key="";let has_api_key=false;if(preset.needsKey)try{const saved=await call<{api_key:string;has_api_key:boolean}>("provider-credential",{provider});api_key=saved.api_key;has_api_key=saved.has_api_key}catch(e){notify(String(e))}setSettings(v=>({...v,provider,api_key,has_api_key,base_url:preset.base_url,model:preset.model}))}
+  async function saveSettings(){try{const r=await call<{credential_backend:string;glossary_path:string}>("save-settings",settings);setSettings(v=>({...v,api_key:"",api_key_changed:false,has_api_key:v.api_key_changed?!!v.api_key.trim():v.has_api_key,credential_backend:r.credential_backend,glossary_path:r.glossary_path}));notify("设置已保存")}catch(e){notify(String(e))}}
+  function changeProvider(provider:Provider){const preset=providerOptions[provider];setSettings(v=>({...v,provider,api_key:"",api_key_changed:false,has_api_key:false,base_url:preset.base_url,model:preset.model,glossary_enabled:preset.supportsGlossary?v.glossary_enabled:false,batch_size:preset.supportsTaskParameters?v.batch_size:"auto",concurrency:preset.supportsTaskParameters?v.concurrency:"auto"}))}
   const warningCount=report?Object.keys(report.warnings).length:0;
 
   return <div className="app-shell">
@@ -64,7 +74,6 @@ function App() {
         <Nav active={view==="history"} icon={<History/>} label="翻译历史" onClick={()=>setView("history")} badge={runs.length||undefined}/>
         <Nav active={view==="settings"} icon={<Settings/>} label="服务设置" onClick={()=>setView("settings")}/>
       </nav>
-      <div className="sidebar-note"><ShieldCheck/><div><strong>格式安全守卫</strong><span>自动保护颜色码、占位符与物品标签</span></div></div>
       <button className="theme-toggle" onClick={()=>setTheme(theme==="light"?"dark":"light")}>{theme==="light"?<Moon/>:<Sun/>}<span>{theme==="light"?"切换深色":"切换浅色"}</span></button>
     </aside>
     <main className="main-area">
@@ -99,7 +108,75 @@ function Metric({label,value,warn=false}:{label:string;value:number;warn?:boolea
 function ReviewPanel({report}:{report:Report}){const entries=Object.entries(report.warnings);return <section className="review-section"><div className="review-heading"><div><p className="eyebrow">MANUAL REVIEW</p><h2>检查格式告警</h2><p>守卫已经保留原文。确认颜色码、占位符和换行后，可直接修正写入。</p></div><span>{entries.length} 条待检查</span></div><div className="review-list">{entries.map(([key,warnings])=><ReviewCard key={key} entryKey={key} warnings={warnings} detail={report.failed_translations[key]} target={report.target_file}/>)}</div></section>}
 function ReviewCard({entryKey,warnings,detail,target}:{entryKey:string;warnings:string[];detail?:{source:string;failed:string;error?:string};target:string}){const [text,setText]=useState(detail?.failed||detail?.source||"");const [status,setStatus]=useState("");async function saveText(){setStatus("正在保存…");try{await call("save-review",{target_file:target,key:entryKey,text});setStatus("已写入目标文件 ✓")}catch(e){setStatus(String(e))}}return <article className="review-card"><div className="review-key"><code>{entryKey}</code><span>{warnings.length} 个问题</span></div><div className="review-columns"><div><label>英文原文</label><p>{detail?.source||"未记录原文"}</p></div><div><label>修正后的中文</label><textarea value={text} onChange={e=>setText(e.target.value)} rows={3}/></div></div><ul>{warnings.map((w,i)=><li key={i}><CircleAlert/>{w}</li>)}</ul><div className="review-actions"><span>{status}</span><button className="secondary" onClick={saveText}><Save/>保存这条修正</button></div></article>}
 
-function SettingsPage({value,onChange,onProviderChange,onSave}:{value:SettingsData;onChange:(v:SettingsData)=>void;onProviderChange:(v:Provider)=>void;onSave:()=>void}){const [show,setShow]=useState(false);const update=(k:keyof SettingsData,v:string)=>onChange({...value,[k]:v});const preset=providerOptions[value.provider];return <div className="page narrow-page"><header className="page-header"><div><p className="eyebrow">SERVICE SETTINGS</p><h1>翻译服务</h1><p>选择官方 API 或免 Key 的实验性网页批量翻译。</p></div></header><section className="settings-layout"><div className="card settings-card"><div className="section-heading"><Sparkles/><div><h2>翻译提供商</h2><p>网页模式无需 API Key，并会自动限制并发、尽量装满单次请求。</p></div></div><label>提供商<select value={value.provider} onChange={e=>onProviderChange(e.target.value as Provider)}>{Object.entries(providerOptions).map(([id,item])=><option value={id} key={id}>{item.label}</option>)}</select></label></div><div className="card settings-card"><div className="section-heading"><KeyRound/><div><h2>服务凭证</h2><p>{preset.needsKey?"API Key 通过系统安全凭证服务保存，不会写入项目文件。":"当前网页翻译模式不需要 API Key。"}</p></div></div><label>API Key<div className="input-with-action"><input disabled={!preset.needsKey} type={show?"text":"password"} value={value.api_key} onChange={e=>update("api_key",e.target.value)} placeholder={preset.needsKey?"填写当前服务的 API Key":"无需填写"}/><button disabled={!preset.needsKey} onClick={()=>setShow(!show)} aria-label={show?"隐藏密钥":"显示密钥"}>{show?<EyeOff/>:<Eye/>}</button></div></label><div className="security-note"><ShieldCheck/><span>{preset.needsKey?`当前存储位置：${value.credential_backend}`:"匿名网页接口 · 实验性支持"}</span></div></div><div className="card settings-card"><div className="section-heading"><Sparkles/><div><h2>模型与接口</h2><p>{value.provider.endsWith("_web")?"网页接口可能随服务端调整而变化，失败时会安全保留原文。":"可配置官方或 OpenAI 兼容服务地址。"}</p></div></div><div className="field-grid"><label>接口地址<input value={value.base_url} onChange={e=>update("base_url",e.target.value)}/></label><label>模型名称<input value={value.model} onChange={e=>update("model",e.target.value)} disabled={value.provider!=="openai_compatible"}/></label><label>每批条目<input value={value.batch_size} onChange={e=>update("batch_size",e.target.value)} placeholder="auto"/><small>网页模式会继续按单次字符上限自动装批</small></label><label>并发请求<input value={value.concurrency} onChange={e=>update("concurrency",e.target.value)} placeholder="auto" disabled={value.provider.endsWith("_web")}/><small>{value.provider.endsWith("_web")?"匿名接口固定低并发，通过大批次减少请求":"网络不稳定时可手动设为 2–4"}</small></label></div><label>翻译要求<textarea rows={5} value={value.style} onChange={e=>update("style",e.target.value)} disabled={value.provider!=="openai_compatible"}/></label></div><div className="settings-actions"><button className="primary" onClick={onSave}><Save/>保存设置</button><span>修改将在下一次任务开始时生效</span></div></section></div>}
+function SettingsPage({value,onChange,onProviderChange,onSave}:{value:SettingsData;onChange:(v:SettingsData)=>void;onProviderChange:(v:Provider)=>void;onSave:()=>void}) {
+  const [show,setShow]=useState(false);
+  const [credentialStatus,setCredentialStatus]=useState("");
+  const update=(k:keyof SettingsData,v:string)=>onChange({...value,[k]:v});
+  const preset=providerOptions[value.provider];
+  const needsCredential=!!preset.credentialLabel;
+
+  async function toggleCredential(){
+    if(show){setShow(false);return}
+    if(value.api_key||value.api_key_changed){setShow(true);return}
+    setCredentialStatus("正在读取钥匙串…");
+    try{
+      const saved=await call<{api_key:string;has_api_key:boolean}>("provider-credential",{provider:value.provider});
+      onChange({...value,api_key:saved.api_key,api_key_changed:false,has_api_key:saved.has_api_key});
+      setShow(true);
+      setCredentialStatus(saved.has_api_key?"已加载到本次应用会话":"钥匙串中没有当前服务的 Key");
+    }catch(e){setCredentialStatus(String(e))}
+  }
+
+  function changeApiKey(api_key:string){
+    onChange({...value,api_key,api_key_changed:true,has_api_key:!!api_key.trim()});
+    setCredentialStatus(api_key.trim()?"新 Key 待保存":"保存后将删除当前服务的 Key");
+  }
+
+  async function chooseGlossary(){
+    const path=await open({multiple:false,directory:false,title:"选择 Minecraft 词表 JSON",filters:[{name:"JSON 词表",extensions:["json"]}]});
+    if(typeof path==="string")onChange({...value,glossary_path:path});
+  }
+
+  async function resetGlossary(){
+    const result=await call<{path:string}>("default-glossary");
+    onChange({...value,glossary_path:result.path});
+  }
+
+  return <div className="page narrow-page">
+    <header className="page-header"><div><p className="eyebrow">SERVICE SETTINGS</p><h1>翻译服务</h1><p>默认使用免 Key 的 Google 网页翻译，也可以切换 DeepSeek / OpenAI 或 DeepL。</p></div></header>
+    <section className="settings-layout">
+      <div className="card settings-card">
+        <div className="section-heading"><Sparkles/><div><h2>翻译提供商</h2><p>{preset.description}</p></div></div>
+        <label>提供商<select value={value.provider} onChange={e=>{setShow(false);setCredentialStatus("");onProviderChange(e.target.value as Provider)}}>{Object.entries(providerOptions).map(([id,item])=><option value={id} key={id}>{item.label}</option>)}</select></label>
+      </div>
+      {preset.supportsGlossary&&<div className="card settings-card">
+        <div className="section-heading"><BookOpen/><div><h2>Minecraft 与模组词表</h2><p>首次运行生成可编辑的默认 JSON，也可以换成自己的词表文件。</p></div></div>
+        <label className="option-row"><span><strong>启用术语保护</strong><small>锁定常见模组名、物品、方块、机器与玩法术语，避免被模型或网页翻译误解。</small></span><input type="checkbox" checked={value.glossary_enabled} onChange={e=>onChange({...value,glossary_enabled:e.target.checked})}/></label>
+        <label className="glossary-path-field">词表文件路径<div className="glossary-path-control"><input value={value.glossary_path} onChange={e=>onChange({...value,glossary_path:e.target.value})} placeholder="选择 minecraft_glossary.json"/><button className="secondary" type="button" onClick={chooseGlossary}><FolderOpen/>选择文件</button><button className="text-button" type="button" onClick={resetGlossary}><RefreshCw/>使用默认文件</button></div><small>可以直接编辑这个 JSON 文件；保存设置时会校验格式，内容变化后自动使用新的缓存空间。</small></label>
+        <div className="security-note"><ShieldCheck/><span>{value.glossary_enabled?"词表已启用 · 按文件内容隔离缓存":"词表未启用 · 使用提供商原始翻译结果"}</span></div>
+      </div>}
+      {needsCredential&&<div className="card settings-card">
+        <div className="section-heading"><KeyRound/><div><h2>服务凭证</h2><p>普通设置不会访问钥匙串；只有查看、修改或实际翻译需要 Key 时才按需读取。</p></div></div>
+        <label>{preset.credentialLabel}<div className="input-with-action"><input type={show?"text":"password"} value={value.api_key} onChange={e=>changeApiKey(e.target.value)} placeholder="不会自动读取；输入新值可替换已保存的 Key"/><button onClick={toggleCredential} aria-label={show?"隐藏密钥":"查看已保存的密钥"}>{show?<EyeOff/>:<Eye/>}</button></div></label>
+        <div className="security-note"><ShieldCheck/><span>{credentialStatus||"钥匙串尚未访问"}</span></div>
+      </div>}
+      {preset.configuration==="deepl"&&<div className="card settings-card">
+        <div className="section-heading"><Languages/><div><h2>DeepL API 配置</h2><p>Free 账户使用 api-free.deepl.com；Pro 账户可改为 api.deepl.com。</p></div></div>
+        <label>接口地址<input value={value.base_url} onChange={e=>update("base_url",e.target.value)} placeholder="https://api-free.deepl.com"/></label>
+      </div>}
+      {preset.configuration==="openai"&&<div className="card settings-card">
+        <div className="section-heading"><Sparkles/><div><h2>DeepSeek / OpenAI 模型配置</h2><p>仅在 DeepSeek / OpenAI 兼容模式下使用。</p></div></div>
+        <div className="field-grid"><label>接口地址<input value={value.base_url} onChange={e=>update("base_url",e.target.value)}/></label><label>模型名称<input value={value.model} onChange={e=>update("model",e.target.value)}/></label></div>
+        <label>翻译要求<textarea rows={5} value={value.style} onChange={e=>update("style",e.target.value)}/></label>
+      </div>}
+      {preset.supportsTaskParameters&&<div className="card settings-card">
+        <div className="section-heading"><Settings/><div><h2>任务参数</h2><p>控制 API 模式下的批处理量和并发请求数。</p></div></div>
+        <div className="field-grid"><label>每批条目<input value={value.batch_size} onChange={e=>update("batch_size",e.target.value)} placeholder="auto"/><small>不确定时保留 auto</small></label><label>并发请求<input value={value.concurrency} onChange={e=>update("concurrency",e.target.value)} placeholder="auto"/><small>网络不稳定时可手动设为 2–4</small></label></div>
+      </div>}
+      <div className="settings-actions"><button className="primary" onClick={onSave}><Save/>保存设置</button><span>修改将在下一次任务开始时生效</span></div>
+    </section>
+  </div>
+}
 
 function HistoryPage({runs,notify,reload}:{runs:Run[];notify:(v:string)=>void;reload:()=>void}){const [query,setQuery]=useState("");const filtered=useMemo(()=>runs.filter(r=>`${r.pack_name} ${r.quests_dir}`.toLowerCase().includes(query.toLowerCase())),[runs,query]);async function remove(id:number){if(!window.confirm("删除这条历史记录？已经写入整合包的文件不会被删除。"))return;try{await call("history-delete",{run_id:id});reload();notify("历史记录已删除")}catch(e){notify(String(e))}}async function exportRun(r:Run){const target=await save({title:"导出汉化内容",defaultPath:`${r.pack_name||"ftb-translation"}-${r.id}.zip`,filters:[{name:"ZIP 压缩包",extensions:["zip"]}]});if(target)try{await call("history-export",{run_id:r.id,path:target});notify("ZIP 已导出")}catch(e){notify(String(e))}}return <div className="page"><header className="page-header history-header"><div><p className="eyebrow">TRANSLATION ARCHIVE</p><h1>翻译历史</h1><p>重新找到每一次写入、备份和可导出的汉化结果。</p></div><div className="search-box"><FileSearch/><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="搜索整合包或路径"/></div></header>{filtered.length?<div className="history-list">{filtered.map(r=><article className="history-row" key={r.id}><div className="history-date"><strong>{new Date(r.created_at).toLocaleDateString("zh-CN",{month:"short",day:"numeric"})}</strong><span>{new Date(r.created_at).toLocaleTimeString("zh-CN",{hour:"2-digit",minute:"2-digit"})}</span></div><div className="history-main"><div><h2>{r.pack_name||"未命名整合包"}</h2><span className="mode-badge">{r.mode==="lang"?"语言文件":"章节文件"}</span></div><p>{r.quests_dir}</p><div className="history-facts"><span><Check/>{r.translated_entries} 条完成</span><span className={r.warning_count?"warning":""}><CircleAlert/>{r.warning_count} 条检查</span><span>{r.model}</span></div></div><div className="history-actions"><button className="secondary" onClick={()=>exportRun(r)}><Archive/>导出</button><button className="icon-button danger" onClick={()=>remove(r.id)} aria-label="删除"><Trash2/></button></div></article>)}</div>:<div className="empty-state"><div><History/></div><h2>{query?"没有匹配的记录":"还没有翻译历史"}</h2><p>{query?"换一个整合包名称或目录关键词。":"完成第一次汉化后，结果会自动出现在这里。"}</p></div>}</div>}
 

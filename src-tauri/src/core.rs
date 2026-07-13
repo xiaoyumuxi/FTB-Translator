@@ -1,6 +1,6 @@
 use crate as crate_root;
 use crate::{
-    chapters, providers,
+    chapters, glossary, providers,
     snbt::{self, LangValue},
     storage::{History, Settings},
 };
@@ -196,6 +196,19 @@ fn restore(text: &str, tokens: &[(String, String)]) -> String {
         .iter()
         .fold(text.to_string(), |s, (p, t)| s.replace(p, t))
 }
+
+fn protect_for_translation(
+    text: &str,
+    glossary: Option<&glossary::Loaded>,
+) -> (String, Vec<(String, String)>) {
+    let (protected, mut tokens) = protect(text);
+    let Some(glossary) = glossary else {
+        return (protected, tokens);
+    };
+    let (protected, glossary_tokens) = glossary.protect(&protected);
+    tokens.extend(glossary_tokens);
+    (protected, tokens)
+}
 fn warnings(source: &str, target: &str) -> Vec<String> {
     let (_, st) = protect(source);
     let (_, tt) = protect(target);
@@ -257,10 +270,19 @@ fn cache_key(source: &str, s: &Settings) -> String {
             s.base_url.trim_end_matches('/')
         )
     };
-    h.update(
+    let cache_data = if s.glossary_enabled {
+        json!({
+            "source_text":source,
+            "model":cache_model,
+            "target_locale":"zh_cn",
+            "style":s.style,
+            "glossary_enabled":true,
+            "glossary_fingerprint":s.glossary_fingerprint
+        })
+    } else {
         json!({"source_text":source,"model":cache_model,"target_locale":"zh_cn","style":s.style})
-            .to_string(),
-    );
+    };
+    h.update(cache_data.to_string());
     hex::encode(h.finalize())
 }
 fn load_cache(q: &Path) -> HashMap<String, String> {
@@ -314,6 +336,7 @@ pub async fn translate(app: AppHandle, data_dir: PathBuf, payload: Value) -> Res
         "style",
         "batch_size",
         "concurrency",
+        "glossary_path",
     ] {
         if let Some(v) = payload[k].as_str() {
             match k {
@@ -323,14 +346,36 @@ pub async fn translate(app: AppHandle, data_dir: PathBuf, payload: Value) -> Res
                 "model" => settings.model = v.into(),
                 "style" => settings.style = v.into(),
                 "batch_size" => settings.batch_size = v.into(),
+                "glossary_path" => settings.glossary_path = v.into(),
                 _ => settings.concurrency = v.into(),
             }
         }
     }
-    providers::normalize(&settings.provider)?;
-    if providers::requires_api_key(&settings.provider) && settings.api_key.trim().is_empty() {
-        return Err("请先保存当前翻译提供商的 API Key".into());
+    if let Some(enabled) = payload["glossary_enabled"].as_bool() {
+        settings.glossary_enabled = enabled;
     }
+    providers::normalize(&settings.provider)?;
+    if !providers::requires_api_key(&settings.provider) {
+        settings.glossary_enabled = false;
+        settings.batch_size = "auto".into();
+        settings.concurrency = "auto".into();
+    }
+    if providers::requires_api_key(&settings.provider) && settings.api_key.trim().is_empty() {
+        settings.api_key = crate_root::storage::translation_api_key(&settings.provider)?;
+    }
+    let loaded_glossary = if settings.glossary_enabled {
+        let path = if settings.glossary_path.trim().is_empty() {
+            glossary::ensure_default(&data_dir)?
+        } else {
+            PathBuf::from(&settings.glossary_path)
+        };
+        let loaded = glossary::Loaded::load(&path)?;
+        settings.glossary_path = path.display().to_string();
+        settings.glossary_fingerprint = loaded.fingerprint().to_string();
+        Some(loaded)
+    } else {
+        None
+    };
     let mut items = vec![];
     let mut lang = None;
     let mut chapter_segs = vec![];
@@ -341,7 +386,7 @@ pub async fn translate(app: AppHandle, data_dir: PathBuf, payload: Value) -> Res
                 LangValue::Text(x) => x.clone(),
                 LangValue::Lines(x) => x.join("\n"),
             };
-            let (p, t) = protect(&source);
+            let (p, t) = protect_for_translation(&source, loaded_glossary.as_ref());
             items.push(Item {
                 id: k.clone(),
                 source,
@@ -353,7 +398,7 @@ pub async fn translate(app: AppHandle, data_dir: PathBuf, payload: Value) -> Res
     } else {
         for file in chapters::files(&q) {
             for s in chapters::extract(&file)? {
-                let (p, t) = protect(&s.source);
+                let (p, t) = protect_for_translation(&s.source, loaded_glossary.as_ref());
                 items.push(Item {
                     id: s.cache_id.clone(),
                     source: s.source.clone(),
@@ -549,6 +594,51 @@ mod tests {
         let a = r#"{"text":"Hello","color":"red"}"#;
         let b = r#"{"text":"你好","color":"blue"}"#;
         assert!(!warnings(a, b).is_empty())
+    }
+    #[test]
+    fn glossary_is_optional_and_restores_curated_terms() {
+        let source = "Use Mekanism with an Enchanting Table";
+        let (plain, plain_tokens) = protect_for_translation(source, None);
+        assert_eq!(restore(&plain, &plain_tokens), source);
+        assert!(!plain.contains("⟨G_"));
+
+        let d = tempdir().unwrap();
+        let path = glossary::ensure_default(d.path()).unwrap();
+        let loaded = glossary::Loaded::load(&path).unwrap();
+        let (protected, tokens) = protect_for_translation(source, Some(&loaded));
+        assert_eq!(protected.matches("⟨G_").count(), 2);
+        assert_eq!(restore(&protected, &tokens), "Use 通用机械 with an 附魔台");
+    }
+    #[test]
+    fn disabled_glossary_keeps_legacy_cache_key() {
+        let settings = Settings {
+            provider: providers::OPENAI_COMPATIBLE.into(),
+            base_url: "https://api.deepseek.com".into(),
+            model: "deepseek-chat".into(),
+            ..Settings::default()
+        };
+        let mut hash = Sha256::new();
+        hash.update(
+            json!({
+                "source_text":"Mekanism",
+                "model":"deepseek-chat",
+                "target_locale":"zh_cn",
+                "style":settings.style
+            })
+            .to_string(),
+        );
+        assert_eq!(
+            cache_key("Mekanism", &settings),
+            hex::encode(hash.finalize())
+        );
+
+        let mut enabled = settings;
+        enabled.glossary_enabled = true;
+        enabled.glossary_fingerprint = "custom-content-hash".into();
+        assert_ne!(
+            cache_key("Mekanism", &enabled),
+            cache_key("Mekanism", &Settings::default())
+        );
     }
     #[test]
     fn scans_lang_pack() {

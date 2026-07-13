@@ -53,13 +53,13 @@ async fn request_openai(
         .map(|(id, text)| (id.clone(), Value::String(text.clone())))
         .collect::<Map<_, _>>();
     let prompt = format!(
-        "Task / 任务：Translate this FTB Quests language map to Simplified Chinese.\nStyle / 风格：{}。\nReturn one JSON object with exactly the same keys. Opaque placeholders like ⟨P_0⟩ must remain byte-for-byte unchanged and appear exactly once. Preserve item IDs, tags, line breaks, numbers and units.\n\n{}",
+        "Task / 任务：Translate this FTB Quests language map to Simplified Chinese.\nStyle / 风格：{}。\nReturn one JSON object with exactly the same keys. Opaque placeholders like ⟨P_0⟩ and ⟨G_0⟩ must remain byte-for-byte unchanged and appear exactly once. Preserve item IDs, tags, line breaks, numbers and units.\n\n{}",
         s.style,
         serde_json::to_string_pretty(&input).unwrap()
     );
     let url = format!("{}/chat/completions", s.base_url.trim_end_matches('/'));
     let messages = json!([
-        {"role":"system","content":"You are a Minecraft modpack localization assistant. Translate only player-facing English into natural Simplified Chinese. Never modify opaque placeholders."},
+        {"role":"system","content":"You are a Minecraft modpack localization assistant. Translate only player-facing English into natural Simplified Chinese. Never modify opaque placeholders; G placeholders are curated Minecraft glossary terms."},
         {"role":"user","content":prompt}
     ]);
     let mut use_response_format = true;

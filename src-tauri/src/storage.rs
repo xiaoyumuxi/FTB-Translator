@@ -3,9 +3,11 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
+    collections::HashMap,
     fs,
     io::Write,
     path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
 };
 use zip::{write::SimpleFileOptions, ZipWriter};
 
@@ -20,6 +22,10 @@ pub struct Settings {
     pub style: String,
     pub batch_size: String,
     pub concurrency: String,
+    pub glossary_enabled: bool,
+    pub glossary_path: String,
+    #[serde(default, skip_serializing)]
+    pub glossary_fingerprint: String,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -27,12 +33,15 @@ impl Default for Settings {
             api_key: String::new(),
             has_api_key: false,
             credential_backend: "系统凭证管理器".into(),
-            provider: crate::providers::OPENAI_COMPATIBLE.into(),
-            base_url: "https://api.deepseek.com".into(),
-            model: "deepseek-chat".into(),
+            provider: crate::providers::GOOGLE_WEB.into(),
+            base_url: "https://translate.googleapis.com".into(),
+            model: "google-web".into(),
             style: "自然玩家向简体中文汉化".into(),
             batch_size: "auto".into(),
             concurrency: "auto".into(),
+            glossary_enabled: false,
+            glossary_path: String::new(),
+            glossary_fingerprint: String::new(),
         }
     }
 }
@@ -45,9 +54,13 @@ struct Config {
     style: String,
     batch_size: String,
     concurrency: String,
+    #[serde(default)]
+    glossary_enabled: bool,
+    #[serde(default)]
+    glossary_path: String,
 }
 fn default_provider() -> String {
-    crate::providers::OPENAI_COMPATIBLE.into()
+    crate::providers::GOOGLE_WEB.into()
 }
 fn entry(provider: &str) -> Result<keyring::Entry, String> {
     let account = if provider == crate::providers::OPENAI_COMPATIBLE {
@@ -60,8 +73,43 @@ fn entry(provider: &str) -> Result<keyring::Entry, String> {
     };
     keyring::Entry::new("ftb-translater", &account).map_err(|e| e.to_string())
 }
+
+fn credential_cache() -> &'static Mutex<HashMap<String, String>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cached_credential(provider: &str) -> Option<String> {
+    credential_cache().lock().ok()?.get(provider).cloned()
+}
+
+fn cache_credential(provider: &str, value: Option<&str>) {
+    if let Ok(mut cache) = credential_cache().lock() {
+        if let Some(value) = value.filter(|value| !value.is_empty()) {
+            cache.insert(provider.to_string(), value.to_string());
+        } else {
+            cache.remove(provider);
+        }
+    }
+}
+
+pub fn translation_api_key(provider: &str) -> Result<String, String> {
+    crate::providers::normalize(provider)?;
+    if let Some(value) = cached_credential(provider) {
+        return Ok(value);
+    }
+    let value = entry(provider)?
+        .get_password()
+        .map_err(|_| "没有可用的 API Key，请在设置中查看或修改 API Key 后重试".to_string())?;
+    cache_credential(provider, Some(&value));
+    Ok(value)
+}
 pub fn load_settings(dir: &Path) -> Settings {
     let mut s = Settings::default();
+    s.glossary_path = crate::glossary::ensure_default(dir)
+        .unwrap_or_else(|_| crate::glossary::default_path(dir))
+        .display()
+        .to_string();
     if let Ok(raw) = fs::read_to_string(dir.join("settings.json")) {
         if let Ok(c) = serde_json::from_str::<Config>(&raw) {
             s.provider = c.provider;
@@ -70,12 +118,10 @@ pub fn load_settings(dir: &Path) -> Settings {
             s.style = c.style;
             s.batch_size = c.batch_size;
             s.concurrency = c.concurrency;
-        }
-    }
-    if let Ok(e) = entry(&s.provider) {
-        if let Ok(k) = e.get_password() {
-            s.api_key = k;
-            s.has_api_key = true
+            s.glossary_enabled = c.glossary_enabled;
+            if !c.glossary_path.trim().is_empty() {
+                s.glossary_path = c.glossary_path;
+            }
         }
     }
     s
@@ -99,35 +145,64 @@ pub fn save_settings(dir: &Path, v: &Value) -> Result<Value, String> {
     fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let provider = v["provider"]
         .as_str()
-        .unwrap_or(crate::providers::OPENAI_COMPATIBLE);
+        .unwrap_or(crate::providers::GOOGLE_WEB);
     crate::providers::normalize(provider)?;
-    let key = v["api_key"].as_str().unwrap_or("").trim();
-    let e = entry(provider)?;
-    if key.is_empty() {
-        let _ = e.delete_credential();
-    } else {
-        e.set_password(key)
-            .map_err(|e| format!("无法保存系统凭证：{e}"))?;
+    if v["api_key_changed"].as_bool().unwrap_or(false) {
+        let key = v["api_key"].as_str().unwrap_or("").trim();
+        let e = entry(provider)?;
+        if key.is_empty() {
+            let _ = e.delete_credential();
+            cache_credential(provider, None);
+        } else {
+            e.set_password(key)
+                .map_err(|e| format!("无法保存系统凭证：{e}"))?;
+            cache_credential(provider, Some(key));
+        }
+    }
+    let web_provider = !crate::providers::requires_api_key(provider);
+    let glossary_enabled = !web_provider && v["glossary_enabled"].as_bool().unwrap_or(false);
+    let glossary_path = match v["glossary_path"].as_str().unwrap_or("").trim() {
+        "" => crate::glossary::ensure_default(dir)?,
+        path => PathBuf::from(path),
+    };
+    if glossary_enabled {
+        crate::glossary::Loaded::load(&glossary_path)?;
     }
     let c = Config {
         provider: provider.into(),
         base_url: parse("base_url")?,
         model: parse("model")?,
         style: parse("style")?,
-        batch_size: parse("batch_size")?,
-        concurrency: parse("concurrency")?,
+        batch_size: if web_provider {
+            "auto".into()
+        } else {
+            parse("batch_size")?
+        },
+        concurrency: if web_provider {
+            "auto".into()
+        } else {
+            parse("concurrency")?
+        },
+        glossary_enabled,
+        glossary_path: glossary_path.display().to_string(),
     };
     fs::write(
         dir.join("settings.json"),
         serde_json::to_vec_pretty(&c).unwrap(),
     )
     .map_err(|e| e.to_string())?;
-    Ok(json!({"credential_backend":"系统凭证管理器"}))
+    Ok(json!({"credential_backend":"系统凭证管理器","glossary_path":glossary_path}))
 }
 
 pub fn provider_credential(provider: &str) -> Result<Value, String> {
     crate::providers::normalize(provider)?;
-    let api_key = entry(provider)?.get_password().unwrap_or_default();
+    let api_key = if let Some(value) = cached_credential(provider) {
+        value
+    } else {
+        let value = entry(provider)?.get_password().unwrap_or_default();
+        cache_credential(provider, Some(&value));
+        value
+    };
     Ok(json!({"api_key":api_key,"has_api_key":!api_key.is_empty()}))
 }
 
@@ -232,6 +307,90 @@ fn pack_name(q: &Path) -> String {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn defaults_to_google_web_with_optional_glossary_disabled() {
+        let settings = Settings::default();
+        assert_eq!(settings.provider, crate::providers::GOOGLE_WEB);
+        assert_eq!(settings.base_url, "https://translate.googleapis.com");
+        assert_eq!(settings.model, "google-web");
+        assert!(!settings.glossary_enabled);
+
+        let old_config = r#"{
+            "provider":"openai_compatible",
+            "base_url":"https://api.deepseek.com",
+            "model":"deepseek-chat",
+            "style":"自然中文",
+            "batch_size":"auto",
+            "concurrency":"auto"
+        }"#;
+        let config: Config = serde_json::from_str(old_config).unwrap();
+        assert!(!config.glossary_enabled);
+    }
+
+    #[test]
+    fn settings_expose_an_editable_default_glossary_path() {
+        let d = tempdir().unwrap();
+        let settings = load_settings(d.path());
+        let path = PathBuf::from(&settings.glossary_path);
+        assert!(path.is_file());
+        assert_eq!(path.file_name().unwrap(), crate::glossary::DEFAULT_FILENAME);
+        fs::write(
+            &path,
+            r#"{"version":3,"entries":[{"source":"Custom","target":"自定义"}]}"#,
+        )
+        .unwrap();
+        load_settings(d.path());
+        assert!(fs::read_to_string(path).unwrap().contains("Custom"));
+    }
+
+    #[test]
+    fn web_provider_persists_only_automatic_settings() {
+        let d = tempdir().unwrap();
+        save_settings(
+            d.path(),
+            &json!({
+                "provider":crate::providers::GOOGLE_WEB,
+                "base_url":"https://translate.googleapis.com",
+                "model":"google-web",
+                "style":"ignored",
+                "batch_size":"99",
+                "concurrency":"8",
+                "glossary_enabled":true,
+                "glossary_path":"",
+                "api_key_changed":false
+            }),
+        )
+        .unwrap();
+        let settings = load_settings(d.path());
+        assert!(!settings.glossary_enabled);
+        assert_eq!(settings.batch_size, "auto");
+        assert_eq!(settings.concurrency, "auto");
+    }
+
+    #[test]
+    fn ordinary_settings_save_reuses_session_key_without_keyring_write() {
+        let d = tempdir().unwrap();
+        let provider = crate::providers::OPENAI_COMPATIBLE;
+        cache_credential(provider, Some("session-only-key"));
+        save_settings(
+            d.path(),
+            &json!({
+                "provider":provider,
+                "base_url":"https://api.deepseek.com",
+                "model":"deepseek-chat",
+                "style":"自然中文",
+                "batch_size":"auto",
+                "concurrency":"auto",
+                "glossary_enabled":false,
+                "api_key":"",
+                "api_key_changed":false
+            }),
+        )
+        .unwrap();
+        assert_eq!(translation_api_key(provider).unwrap(), "session-only-key");
+        cache_credential(provider, None);
+    }
 
     #[test]
     fn history_roundtrip_and_export() {
