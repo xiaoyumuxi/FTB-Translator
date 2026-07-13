@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from ftb_translater.cache import TranslationCache
-from ftb_translater.chapters import count_chapter_segments, extract_chapter_segments
+from ftb_translater.chapters import count_chapter_segments, extract_chapter_segments, replace_chapter_segments
 from ftb_translater.config import (
     BASE_URL_KEY,
     BATCH_SIZE_KEY,
@@ -552,6 +552,147 @@ class CoreTests(unittest.TestCase):
             self.assertIn('icon: "minecraft:stone"', output)
             self.assertTrue(Path(report.backup_dir, "chapters", "basics.snbt").exists())
             self.assertTrue(json.loads((quests / ".ftb-translater" / "report-latest.json").read_text()))
+
+    def test_chapter_segments_parse_nested_values_without_false_positives(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            chapter = Path(tmp) / "nested.snbt"
+            chapter.write_text(
+                """
+{
+  quests: [
+    {
+      description: [
+        "Craft a table",
+        { id: "internal English", text: "Visible Text", name: "Display Name" },
+        ["Nested Line"]
+      ],
+      dependencies: ["Not A Task Line"],
+      icon: "minecraft:stone"
+    }
+  ]
+}
+""".strip(),
+                encoding="utf-8",
+            )
+
+            segments = extract_chapter_segments(chapter)
+
+            self.assertEqual(
+                [(segment.key, segment.source_text) for segment in segments],
+                [
+                    ("description", "Craft a table"),
+                    ("text", "Visible Text"),
+                    ("name", "Display Name"),
+                    ("description", "Nested Line"),
+                ],
+            )
+
+    def test_chapter_segment_replacement_uses_parsed_spans_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            chapter = Path(tmp) / "replace.snbt"
+            chapter.write_text(
+                """
+{
+  title: 'First Quest',
+  description: [
+    { id: "internal English", text: "Visible Text" }
+  ]
+}
+""".strip(),
+                encoding="utf-8",
+            )
+
+            replaced = replace_chapter_segments(chapter, {1: "可见文本"})
+            output = chapter.read_text(encoding="utf-8")
+
+            self.assertEqual(replaced, 1)
+            self.assertIn("title: 'First Quest'", output)
+            self.assertIn('id: "internal English"', output)
+            self.assertIn('text: "可见文本"', output)
+
+    def test_chapter_segments_accept_translation_table_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            chapter = Path(tmp) / "translations.snbt"
+            chapter.write_text(
+                """
+{
+  "quest.0123456789ABCDEF.title": "Quest Title",
+  quest.0123456789ABCDEF.quest_desc: [
+    "First description line",
+    "",
+    "Second description line"
+  ],
+  "chapter.1111111111111111.chapter_subtitle": ["Chapter Subtitle"],
+  "quest.0123456789ABCDEF.dependencies": ["Not a title"]
+}
+""".strip(),
+                encoding="utf-8",
+            )
+
+            segments = extract_chapter_segments(chapter)
+
+            self.assertEqual(
+                [(segment.key, segment.source_text) for segment in segments],
+                [
+                    ("quest.0123456789ABCDEF.title", "Quest Title"),
+                    ("quest.0123456789ABCDEF.quest_desc", "First description line"),
+                    ("quest.0123456789ABCDEF.quest_desc", "Second description line"),
+                    ("chapter.1111111111111111.chapter_subtitle", "Chapter Subtitle"),
+                ],
+            )
+
+    def test_chapter_segments_accept_initial_translation_blocks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            chapter = Path(tmp) / "extra.snbt"
+            chapter.write_text(
+                """
+{
+  extra: {
+    locale: "en_us",
+    translate: {
+      title: "Initial Title",
+      quest_desc: ["Initial Description"],
+      invalid_key: "Do Not Translate"
+    }
+  }
+}
+""".strip(),
+                encoding="utf-8",
+            )
+
+            segments = extract_chapter_segments(chapter)
+
+            self.assertEqual(
+                [(segment.key, segment.source_text) for segment in segments],
+                [
+                    ("title", "Initial Title"),
+                    ("quest_desc", "Initial Description"),
+                ],
+            )
+
+    def test_chapter_segments_skip_reference_style_values(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            chapter = Path(tmp) / "references.snbt"
+            chapter.write_text(
+                """
+{
+  quests: [{
+    description: "ftb.shop.notification.guidance",
+    text: "This should be translated",
+    name: "minecraft:stone",
+    subtitle: "echo_guidance_meet"
+  }]
+}
+""".strip(),
+                encoding="utf-8",
+            )
+
+            segments = extract_chapter_segments(chapter)
+
+            self.assertEqual(
+                [(segment.key, segment.source_text) for segment in segments],
+                [("text", "This should be translated")],
+            )
 
     def test_estimate_batches(self) -> None:
         self.assertEqual(estimate_batches(0, 20), 0)
