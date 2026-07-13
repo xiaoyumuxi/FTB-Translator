@@ -14,6 +14,7 @@ pub struct Settings {
     pub api_key: String,
     pub has_api_key: bool,
     pub credential_backend: String,
+    pub provider: String,
     pub base_url: String,
     pub model: String,
     pub style: String,
@@ -26,6 +27,7 @@ impl Default for Settings {
             api_key: String::new(),
             has_api_key: false,
             credential_backend: "系统凭证管理器".into(),
+            provider: crate::providers::OPENAI_COMPATIBLE.into(),
             base_url: "https://api.deepseek.com".into(),
             model: "deepseek-chat".into(),
             style: "自然玩家向简体中文汉化".into(),
@@ -36,19 +38,33 @@ impl Default for Settings {
 }
 #[derive(Serialize, Deserialize)]
 struct Config {
+    #[serde(default = "default_provider")]
+    provider: String,
     base_url: String,
     model: String,
     style: String,
     batch_size: String,
     concurrency: String,
 }
-fn entry() -> Result<keyring::Entry, String> {
-    keyring::Entry::new("ftb-translater", "deepseek_api_key").map_err(|e| e.to_string())
+fn default_provider() -> String {
+    crate::providers::OPENAI_COMPATIBLE.into()
+}
+fn entry(provider: &str) -> Result<keyring::Entry, String> {
+    let account = if provider == crate::providers::OPENAI_COMPATIBLE {
+        "deepseek_api_key".to_string()
+    } else {
+        format!(
+            "{}_api_key",
+            provider.replace(|c: char| !c.is_ascii_alphanumeric() && c != '_', "")
+        )
+    };
+    keyring::Entry::new("ftb-translater", &account).map_err(|e| e.to_string())
 }
 pub fn load_settings(dir: &Path) -> Settings {
     let mut s = Settings::default();
     if let Ok(raw) = fs::read_to_string(dir.join("settings.json")) {
         if let Ok(c) = serde_json::from_str::<Config>(&raw) {
+            s.provider = c.provider;
             s.base_url = c.base_url;
             s.model = c.model;
             s.style = c.style;
@@ -56,7 +72,7 @@ pub fn load_settings(dir: &Path) -> Settings {
             s.concurrency = c.concurrency;
         }
     }
-    if let Ok(e) = entry() {
+    if let Ok(e) = entry(&s.provider) {
         if let Ok(k) = e.get_password() {
             s.api_key = k;
             s.has_api_key = true
@@ -81,8 +97,12 @@ pub fn save_settings(dir: &Path, v: &Value) -> Result<Value, String> {
         Ok(x)
     };
     fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let provider = v["provider"]
+        .as_str()
+        .unwrap_or(crate::providers::OPENAI_COMPATIBLE);
+    crate::providers::normalize(provider)?;
     let key = v["api_key"].as_str().unwrap_or("").trim();
-    let e = entry()?;
+    let e = entry(provider)?;
     if key.is_empty() {
         let _ = e.delete_credential();
     } else {
@@ -90,6 +110,7 @@ pub fn save_settings(dir: &Path, v: &Value) -> Result<Value, String> {
             .map_err(|e| format!("无法保存系统凭证：{e}"))?;
     }
     let c = Config {
+        provider: provider.into(),
         base_url: parse("base_url")?,
         model: parse("model")?,
         style: parse("style")?,
@@ -102,6 +123,12 @@ pub fn save_settings(dir: &Path, v: &Value) -> Result<Value, String> {
     )
     .map_err(|e| e.to_string())?;
     Ok(json!({"credential_backend":"系统凭证管理器"}))
+}
+
+pub fn provider_credential(provider: &str) -> Result<Value, String> {
+    crate::providers::normalize(provider)?;
+    let api_key = entry(provider)?.get_password().unwrap_or_default();
+    Ok(json!({"api_key":api_key,"has_api_key":!api_key.is_empty()}))
 }
 
 pub struct History {

@@ -1,6 +1,6 @@
 use crate as crate_root;
 use crate::{
-    chapters,
+    chapters, providers,
     snbt::{self, LangValue},
     storage::{History, Settings},
 };
@@ -9,7 +9,7 @@ use futures::stream::{self, StreamExt};
 use regex::Regex;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, HashMap},
@@ -247,8 +247,18 @@ fn json_shape(v: &Value) -> Value {
 }
 fn cache_key(source: &str, s: &Settings) -> String {
     let mut h = Sha256::new();
+    let cache_model = if s.provider == providers::OPENAI_COMPATIBLE {
+        s.model.clone()
+    } else {
+        format!(
+            "{}:{}:{}",
+            s.provider,
+            s.model,
+            s.base_url.trim_end_matches('/')
+        )
+    };
     h.update(
-        json!({"source_text":source,"model":s.model,"target_locale":"zh_cn","style":s.style})
+        json!({"source_text":source,"model":cache_model,"target_locale":"zh_cn","style":s.style})
             .to_string(),
     );
     hex::encode(h.finalize())
@@ -288,46 +298,9 @@ async fn request(
 ) -> Result<HashMap<String, String>, String> {
     let input = batch
         .iter()
-        .map(|x| (x.id.clone(), Value::String(x.protected.clone())))
-        .collect::<Map<_, _>>();
-    let prompt=format!("Task / 任务：Translate this FTB Quests language map to Simplified Chinese.\nStyle / 风格：{}。\nReturn one JSON object with exactly the same keys. Opaque placeholders like ⟨P_0⟩ must remain byte-for-byte unchanged and appear exactly once. Preserve item IDs, tags, line breaks, numbers and units.\n\n{}",s.style,serde_json::to_string_pretty(&input).unwrap());
-    let url = format!("{}/chat/completions", s.base_url.trim_end_matches('/'));
-    let body = json!({"model":s.model,"messages":[{"role":"system","content":"You are a Minecraft modpack localization assistant. Translate only player-facing English into natural Simplified Chinese. Never modify opaque placeholders."},{"role":"user","content":prompt}],"temperature":0.2,"response_format":{"type":"json_object"}});
-    let mut last = String::new();
-    for attempt in 0..3 {
-        match client
-            .post(&url)
-            .bearer_auth(&s.api_key)
-            .json(&body)
-            .send()
-            .await
-        {
-            Ok(r) => {
-                if !r.status().is_success() {
-                    last = format!(
-                        "HTTP {}: {}",
-                        r.status(),
-                        r.text().await.unwrap_or_default()
-                    );
-                } else {
-                    let v: Value = r.json().await.map_err(|e| e.to_string())?;
-                    let content = v
-                        .pointer("/choices/0/message/content")
-                        .and_then(Value::as_str)
-                        .ok_or("DeepSeek 返回内容为空")?;
-                    let map: HashMap<String, String> = serde_json::from_str(content)
-                        .map_err(|e| format!("DeepSeek 返回的 JSON 无效：{e}"))?;
-                    if batch.iter().all(|x| map.contains_key(&x.id)) {
-                        return Ok(map);
-                    }
-                    last = "DeepSeek 返回内容缺少条目".into();
-                }
-            }
-            Err(e) => last = e.to_string(),
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(800 * (attempt + 1))).await;
-    }
-    Err(last)
+        .map(|x| (x.id.clone(), x.protected.clone()))
+        .collect::<Vec<_>>();
+    providers::request(client, s, &input).await
 }
 pub async fn translate(app: AppHandle, data_dir: PathBuf, payload: Value) -> Result<(), String> {
     let q = PathBuf::from(payload["quests_dir"].as_str().ok_or("缺少任务书目录")?);
@@ -335,6 +308,7 @@ pub async fn translate(app: AppHandle, data_dir: PathBuf, payload: Value) -> Res
     let mut settings = crate_root::storage::load_settings(&data_dir);
     for k in [
         "api_key",
+        "provider",
         "base_url",
         "model",
         "style",
@@ -344,6 +318,7 @@ pub async fn translate(app: AppHandle, data_dir: PathBuf, payload: Value) -> Res
         if let Some(v) = payload[k].as_str() {
             match k {
                 "api_key" => settings.api_key = v.into(),
+                "provider" => settings.provider = v.into(),
                 "base_url" => settings.base_url = v.into(),
                 "model" => settings.model = v.into(),
                 "style" => settings.style = v.into(),
@@ -352,8 +327,9 @@ pub async fn translate(app: AppHandle, data_dir: PathBuf, payload: Value) -> Res
             }
         }
     }
-    if settings.api_key.trim().is_empty() {
-        return Err("请先保存 DeepSeek API Key".into());
+    providers::normalize(&settings.provider)?;
+    if providers::requires_api_key(&settings.provider) && settings.api_key.trim().is_empty() {
+        return Err("请先保存当前翻译提供商的 API Key".into());
     }
     let mut items = vec![];
     let mut lang = None;
@@ -401,7 +377,10 @@ pub async fn translate(app: AppHandle, data_dir: PathBuf, payload: Value) -> Res
         }
     }
     let bs = parse_auto(&settings.batch_size, 25)?;
-    let concurrency = parse_auto(&settings.concurrency, 6)?.min(12);
+    let mut concurrency = parse_auto(&settings.concurrency, 6)?.min(12);
+    if let Some(limit) = providers::concurrency_limit(&settings.provider) {
+        concurrency = concurrency.min(limit);
+    }
     let batches = pending.chunks(bs).map(|x| x.to_vec()).collect::<Vec<_>>();
     let total = pending.len();
     let client = Client::new();

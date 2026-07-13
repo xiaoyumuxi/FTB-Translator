@@ -1,5 +1,6 @@
 mod chapters;
 mod core;
+mod providers;
 mod snbt;
 mod storage;
 
@@ -20,6 +21,9 @@ fn bridge(app: tauri::AppHandle, command: String, payload: Option<Value>) -> Res
         "scan" => core::scan(&v),
         "settings" => serde_json::to_value(storage::load_settings(&dir)).map_err(|e| e.to_string()),
         "save-settings" => storage::save_settings(&dir, &v),
+        "provider-credential" => {
+            storage::provider_credential(v["provider"].as_str().ok_or("缺少翻译提供商")?)
+        }
         "history-list" => History::new(&dir)?.list(),
         "history-delete" => {
             History::new(&dir)?.delete(v["run_id"].as_i64().ok_or("缺少历史编号")?)?;
