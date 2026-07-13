@@ -26,8 +26,16 @@ SERVICE_NAME = "ftb-translater"
 ACCOUNT_NAME = "deepseek_api_key"
 
 
-def _fallback_path() -> Path:
-    return user_config_dir() / ".credential-fallback"
+def _credential_account(provider: str | None = None) -> str:
+    if not provider or provider == "openai_compatible":
+        return ACCOUNT_NAME
+    safe_provider = "".join(char for char in provider.lower() if char.isalnum() or char in {"-", "_"})
+    return f"{safe_provider or 'translation'}_api_key"
+
+
+def _fallback_path(provider: str | None = None) -> Path:
+    suffix = "" if not provider or provider == "openai_compatible" else f"-{_credential_account(provider)}"
+    return user_config_dir() / f".credential-fallback{suffix}"
 
 
 def _machine_key() -> bytes:
@@ -54,7 +62,7 @@ def _keyring_available() -> bool:
         return False
 
 
-def save_api_key(api_key: str) -> str:
+def save_api_key(api_key: str, provider: str | None = None) -> str:
     """Save the API key and return the backend actually used."""
     api_key = api_key.strip()
     if _keyring_available():
@@ -63,46 +71,46 @@ def save_api_key(api_key: str) -> str:
 
             if not api_key:
                 try:
-                    keyring.delete_password(SERVICE_NAME, ACCOUNT_NAME)
+                    keyring.delete_password(SERVICE_NAME, _credential_account(provider))
                 except Exception:  # noqa: BLE001
                     pass
             else:
-                keyring.set_password(SERVICE_NAME, ACCOUNT_NAME, api_key)
+                keyring.set_password(SERVICE_NAME, _credential_account(provider), api_key)
             _log.info("API key saved to system keyring")
-            _clear_fallback()
+            _clear_fallback(provider)
             return "keyring"
         except Exception as exc:  # noqa: BLE001
             _log.warning("Keyring save failed, falling back to encrypted file: %s", exc)
-    _save_fallback(api_key)
+    _save_fallback(api_key, provider)
     return "fallback"
 
 
-def load_api_key() -> str:
+def load_api_key(provider: str | None = None) -> str:
     if _keyring_available():
         try:
             import keyring
 
-            value = keyring.get_password(SERVICE_NAME, ACCOUNT_NAME)
+            value = keyring.get_password(SERVICE_NAME, _credential_account(provider))
             if value:
                 return value
         except Exception as exc:  # noqa: BLE001
             _log.warning("Keyring load failed, trying fallback: %s", exc)
-    return _load_fallback()
+    return _load_fallback(provider)
 
 
-def delete_api_key() -> None:
+def delete_api_key(provider: str | None = None) -> None:
     if _keyring_available():
         try:
             import keyring
 
-            keyring.delete_password(SERVICE_NAME, ACCOUNT_NAME)
+            keyring.delete_password(SERVICE_NAME, _credential_account(provider))
         except Exception:  # noqa: BLE001
             pass
-    _clear_fallback()
+    _clear_fallback(provider)
 
 
-def has_api_key() -> bool:
-    return bool(load_api_key())
+def has_api_key(provider: str | None = None) -> bool:
+    return bool(load_api_key(provider))
 
 
 def storage_backend_label(backend: str | None = None) -> str:
@@ -121,13 +129,13 @@ def storage_backend_label(backend: str | None = None) -> str:
     return "本地受限文件(非加密,仅做混淆)"
 
 
-def _save_fallback(api_key: str) -> None:
+def _save_fallback(api_key: str, provider: str | None = None) -> None:
     from cryptography.fernet import Fernet
 
-    path = _fallback_path()
+    path = _fallback_path(provider)
     path.parent.mkdir(parents=True, exist_ok=True)
     if not api_key:
-        _clear_fallback()
+        _clear_fallback(provider)
         return
     token = Fernet(_machine_key()).encrypt(api_key.encode("utf-8"))
     path.write_bytes(token)
@@ -138,10 +146,10 @@ def _save_fallback(api_key: str) -> None:
     _log.info("API key saved to encrypted fallback file")
 
 
-def _load_fallback() -> str:
+def _load_fallback(provider: str | None = None) -> str:
     from cryptography.fernet import Fernet, InvalidToken
 
-    path = _fallback_path()
+    path = _fallback_path(provider)
     if not path.exists():
         return ""
     try:
@@ -152,8 +160,8 @@ def _load_fallback() -> str:
         return ""
 
 
-def _clear_fallback() -> None:
-    path = _fallback_path()
+def _clear_fallback(provider: str | None = None) -> None:
+    path = _fallback_path(provider)
     if path.exists():
         try:
             path.unlink()

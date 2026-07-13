@@ -18,7 +18,7 @@ class DeepSeekTranslationError(RuntimeError):
     pass
 
 
-class DeepSeekTranslator:
+class OpenAICompatibleTranslator:
     def __init__(
         self,
         api_key: str,
@@ -42,13 +42,13 @@ class DeepSeekTranslator:
         last_error: Exception | None = None
         for attempt in range(self.retries + 1):
             try:
-                msg = f"Calling DeepSeek {self.model}: {len(entries)} entries, attempt {attempt + 1}."
+                msg = f"Calling OpenAI-compatible API {self.model}: {len(entries)} entries, attempt {attempt + 1}."
                 _log.info(msg)
                 self._log(msg)
                 return self._request_json(prompt, expected_keys=set(entries))
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
-                msg = f"DeepSeek batch attempt {attempt + 1} failed: {exc}"
+                msg = f"OpenAI-compatible batch attempt {attempt + 1} failed: {exc}"
                 _log.warning(msg)
                 self._log(msg)
                 if attempt < self.retries:
@@ -58,7 +58,7 @@ class DeepSeekTranslator:
         failures: list[str] = []
         for key, value in entries.items():
             try:
-                msg = f"Retrying DeepSeek as single entry: {key}"
+                msg = f"Retrying OpenAI-compatible API as single entry: {key}"
                 _log.info(msg)
                 self._log(msg)
                 recovered[key] = self._request_json(
@@ -84,7 +84,7 @@ class DeepSeekTranslator:
             raise DeepSeekTranslationError("DeepSeek returned an empty response.")
         _log.debug("DeepSeek raw response length: %d chars", len(content))
         try:
-            raw = json.loads(content)
+            raw = self._parse_json_object(content)
         except json.JSONDecodeError as exc:
             _log.error("DeepSeek returned invalid JSON: %s\nRaw content: %s", exc, content[:500])
             raise DeepSeekTranslationError(f"DeepSeek returned invalid JSON: {exc}") from exc
@@ -106,9 +106,9 @@ class DeepSeekTranslator:
         return {key: str(raw[key]) for key in expected_keys}
 
     def _request_json_response(self, prompt: str) -> Any:
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[
+        request = {
+            "model": self.model,
+            "messages": [
                 {
                     "role": "system",
                     "content": (
@@ -121,10 +121,46 @@ class DeepSeekTranslator:
                 },
                 {"role": "user", "content": prompt},
             ],
-            temperature=0.2,
-            response_format={"type": "json_object"},
-        )
-        return response
+            "temperature": 0.2,
+        }
+        try:
+            return self.client.chat.completions.create(
+                **request,
+                response_format={"type": "json_object"},
+            )
+        except Exception as exc:  # noqa: BLE001
+            if not self._is_response_format_unsupported(exc):
+                raise
+            msg = "API does not support response_format=json_object; retrying with prompt-only JSON mode."
+            _log.info(msg)
+            self._log(msg)
+            return self.client.chat.completions.create(**request)
+
+    @staticmethod
+    def _parse_json_object(content: str) -> Any:
+        text = content.strip()
+        if text.startswith("```"):
+            lines = text.splitlines()
+            if lines and lines[0].strip().lower() in {"```", "```json"}:
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            text = "\n".join(lines).strip()
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            start = text.find("{")
+            end = text.rfind("}")
+            if start >= 0 and end > start:
+                return json.loads(text[start : end + 1])
+            raise
+
+    @staticmethod
+    def _is_response_format_unsupported(exc: Exception) -> bool:
+        message = str(exc).lower()
+        status_code = getattr(exc, "status_code", None)
+        mentions_format = "response_format" in message or "json_object" in message
+        return mentions_format and (status_code in {400, 404, 422} or "unsupported" in message or "unknown" in message)
 
     @staticmethod
     def _build_prompt(entries: Mapping[str, str], style: str) -> str:
@@ -168,3 +204,7 @@ class DeepSeekTranslator:
     def _log(self, message: str) -> None:
         if self.logger:
             self.logger(message)
+
+
+# Backward-compatible name for callers that imported the original DeepSeek-only client.
+DeepSeekTranslator = OpenAICompatibleTranslator

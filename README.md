@@ -1,6 +1,6 @@
 # FTB Translater
 
-FTB Translater 是一个用于汉化现代 FTB Quests 任务文本的桌面工具，翻译接口使用 DeepSeek。目前固定支持 `en_us -> zh_cn`。
+FTB Translater 是一个用于汉化现代 FTB Quests 任务文本的桌面工具，支持 OpenAI 兼容接口、DeepL 官方 API，以及无需 API Key 的实验性网页翻译接口。目前固定支持 `en_us -> zh_cn`。
 
 ## 功能
 
@@ -41,7 +41,7 @@ ftb-translater
 
 ## 配置
 
-右上角“设置”里可以填写 DeepSeek API Key 和翻译参数。
+右上角“设置”里可以选择翻译提供商、填写对应 API Key 和翻译参数。
 
 API Key 优先保存到系统凭证管理器：
 
@@ -53,8 +53,9 @@ API Key 优先保存到系统凭证管理器：
 
 设置面板还可以配置：
 
-- DeepSeek API 地址：`DEEPSEEK_BASE_URL`
-- 模型名：`DEEPSEEK_MODEL`
+- 翻译提供商：`FTB_TRANSLATER_PROVIDER`，可选 `openai_compatible`、`deepl`、`google_web` 或 `deepl_web`
+- API 地址：`DEEPSEEK_BASE_URL`（沿用旧配置名以保持兼容）
+- 模型名：`DEEPSEEK_MODEL`（DeepL 模式保持 `deepl` 即可）
 - 翻译风格：`FTB_TRANSLATER_STYLE`
 - 批大小：`FTB_TRANSLATER_BATCH_SIZE`，填 `auto` 使用自动策略
 - 并发数：`FTB_TRANSLATER_CONCURRENCY`，填 `auto` 使用自动策略
@@ -79,9 +80,15 @@ $env:FTB_TRANSLATER_CONCURRENCY=auto
 4. 程序会先弹窗确认覆盖写入，然后创建备份。
 5. 翻译完成后可以查看日志、报告和历史记录。
 
-程序会自动切分翻译请求，并根据任务规模选择保守的并发数。翻译时日志区域会显示 DeepSeek 调用、批次进度、备份创建和覆盖写入目标。
+程序会自动切分翻译请求，并根据任务规模选择保守的并发数。翻译时日志区域会显示 API 调用、批次进度、备份创建和覆盖写入目标。
 
-如果 DeepSeek 返回的译文丢失受保护格式，该条译文会被丢弃并保留原文。当前保护内容包括：
+OpenAI 兼容模式默认使用 DeepSeek，也可以填写 OpenAI、OpenRouter、硅基流动或中转服务的 Base URL 与模型名。如果服务不支持 `response_format=json_object`，程序会自动回退到仅通过提示词约束 JSON，并兼容 Markdown 代码块包裹的 JSON 返回值。
+
+DeepL 模式默认使用 Free API 地址 `https://api-free.deepl.com`；Pro 账号可改为 `https://api.deepl.com`。DeepL 不使用翻译风格和模型参数。
+
+Google 和 DeepL 网页翻译模式不需要 API Key。它们调用的是网站或浏览器扩展使用的匿名接口，不属于官方稳定 API，因此程序会强制使用低并发、失败重试和本地缓存。Google 会用不可翻译的批次标记在一次 POST 中装入约 4500 字符，DeepL 会按匿名端点限制在一次请求中装入约 1500 字符。服务端限流、鉴权规则或接口格式随时可能变化；调用失败时程序会保留原文，不应将网页模式视为有可用性保证的服务。
+
+如果翻译 API 返回的译文丢失受保护格式，该条译文会被丢弃并保留原文。当前保护内容包括：
 
 - FTB / Minecraft 格式码，例如 `&e`、`&r`、`§a`
 - 占位符，例如 `%s`、`%1$s`

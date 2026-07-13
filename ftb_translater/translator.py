@@ -13,10 +13,11 @@ from typing import Protocol, cast
 from ftb_translater.backup import create_backup
 from ftb_translater.cache import TranslationCache
 from ftb_translater.chapters import chapter_files, extract_chapter_segments, replace_chapter_segments
-from ftb_translater.deepseek_client import DEFAULT_BASE_URL, DEFAULT_MODEL, DEFAULT_STYLE, DeepSeekTranslator
+from ftb_translater.deepseek_client import DEFAULT_BASE_URL, DEFAULT_MODEL, DEFAULT_STYLE
 from ftb_translater.format_guard import preserved_token_warnings, protect_text, repair_translation_format, restore_text
 from ftb_translater.logger import get_logger
 from ftb_translater.paths import detect_source_mode, source_lang_path, target_lang_path
+from ftb_translater.providers import DEFAULT_PROVIDER, create_translator, provider_cache_id, provider_max_workers
 from ftb_translater.report import TranslationReport
 from ftb_translater.snbt import LangValue, load_lang_snbt, write_lang_snbt
 
@@ -86,6 +87,7 @@ def translate_quests_lang(
     translator: TranslatorClient | None = None,
     max_workers: int | None = None,
     base_url: str = DEFAULT_BASE_URL,
+    provider: str = DEFAULT_PROVIDER,
 ) -> TranslationReport:
     if batch_size is not None and batch_size <= 0:
         raise ValueError("Batch size must be greater than zero.")
@@ -108,9 +110,10 @@ def translate_quests_lang(
     warnings: dict[str, list[str]] = {}
     failed_translations: dict[str, dict[str, str]] = {}
 
+    cache_model = provider_cache_id(provider, model, base_url)
     for key, value in source_values.items():
         source_text = _lang_value_to_text(value)
-        cached = cache.get(source_text, model, "zh_cn", style)
+        cached = cache.get(source_text, cache_model, "zh_cn", style)
         if cached is not None:
             translated_values[key] = _text_to_lang_value(cached, value)
             cache_hits += 1
@@ -133,6 +136,7 @@ def translate_quests_lang(
         model=model,
         style=style,
         base_url=base_url,
+        provider=provider,
         logger=logger,
         progress=progress,
         progress_total=total_pending,
@@ -156,7 +160,7 @@ def translate_quests_lang(
             translated_text, token_warnings = _guard_translation(source_text, translated_text, protections_by_key[key])
             translated_values[key] = _text_to_lang_value(translated_text, source_values[key])
             if translated_text != source_text:
-                cache.set(source_text, model, "zh_cn", style, translated_text)
+                cache.set(source_text, cache_model, "zh_cn", style, translated_text)
             if token_warnings:
                 _log.warning("Format token mismatch for key %r: %s", key, token_warnings)
                 warnings[key] = token_warnings
@@ -234,6 +238,7 @@ def translate_quests_chapters(
     translator: TranslatorClient | None = None,
     max_workers: int | None = None,
     base_url: str = DEFAULT_BASE_URL,
+    provider: str = DEFAULT_PROVIDER,
 ) -> TranslationReport:
     if batch_size is not None and batch_size <= 0:
         raise ValueError("Batch size must be greater than zero.")
@@ -259,8 +264,9 @@ def translate_quests_chapters(
     warnings: dict[str, list[str]] = {}
     failed_translations: dict[str, dict[str, str]] = {}
 
+    cache_model = provider_cache_id(provider, model, base_url)
     for segment in all_segments:
-        cached = cache.get(segment.source_text, model, "zh_cn", style)
+        cached = cache.get(segment.source_text, cache_model, "zh_cn", style)
         if cached is not None:
             translations_by_file[segment.path][segment.index] = cached
             cache_hits += 1
@@ -283,6 +289,7 @@ def translate_quests_chapters(
         model=model,
         style=style,
         base_url=base_url,
+        provider=provider,
         logger=logger,
         progress=progress,
         progress_total=len(pending),
@@ -307,7 +314,7 @@ def translate_quests_chapters(
             translated_text, token_warnings = _guard_translation(source_text, translated_text, protections_by_key[cache_id])
             translations_by_file[segment.path][segment.index] = translated_text
             if translated_text != source_text:
-                cache.set(source_text, model, "zh_cn", style, translated_text)
+                cache.set(source_text, cache_model, "zh_cn", style, translated_text)
             if token_warnings:
                 _log.warning("Format token mismatch for segment %r: %s", cache_id, token_warnings)
                 warnings[cache_id] = token_warnings
@@ -381,6 +388,7 @@ def translate_quests_auto(
     translator: TranslatorClient | None = None,
     max_workers: int | None = None,
     base_url: str = DEFAULT_BASE_URL,
+    provider: str = DEFAULT_PROVIDER,
 ) -> TranslationReport:
     mode = detect_source_mode(quests_dir)
     _log.info("translate_quests_auto: mode=%s quests_dir=%s", mode, quests_dir)
@@ -392,6 +400,7 @@ def translate_quests_auto(
             model=model,
             style=style,
             base_url=base_url,
+            provider=provider,
             progress=progress,
             logger=logger,
             translator=translator,
@@ -404,6 +413,7 @@ def translate_quests_auto(
         model=model,
         style=style,
         base_url=base_url,
+        provider=provider,
         progress=progress,
         logger=logger,
         translator=translator,
@@ -417,6 +427,7 @@ def _translate_batches(
     model: str,
     style: str,
     base_url: str,
+    provider: str,
     logger: LogCallback | None,
     progress: ProgressCallback | None,
     progress_total: int,
@@ -425,14 +436,17 @@ def _translate_batches(
     max_workers: int | None,
 ) -> list[_BatchResult]:
     worker_count = _resolve_max_workers(max_workers, len(batches), progress_total)
+    worker_limit = provider_max_workers(provider)
+    if worker_limit is not None:
+        worker_count = min(worker_count, worker_limit)
     if not batches:
         if progress:
             progress("done", 0, progress_total)
         return []
 
     if logger:
-        logger(f"DeepSeek concurrency: {worker_count} worker(s), {len(batches)} batches.")
-    _log.info("DeepSeek concurrency: %d worker(s), %d batches", worker_count, len(batches))
+        logger(f"Translation API concurrency: {worker_count} worker(s), {len(batches)} batches.")
+    _log.info("Translation API concurrency: %d worker(s), %d batches", worker_count, len(batches))
 
     completed_entries = 0
     results: list[_BatchResult] = []
@@ -449,6 +463,7 @@ def _translate_batches(
                 model=model,
                 style=style,
                 base_url=base_url,
+                provider=provider,
                 logger=logger,
                 label=label,
                 translator=translator,
@@ -466,7 +481,9 @@ def _translate_batches(
         if worker_translator is None:
             worker_translator = cast(TranslatorClient | None, getattr(thread_state, "translator", None))
             if worker_translator is None:
-                worker_translator = DeepSeekTranslator(api_key=api_key, model=model, base_url=base_url, logger=logger)
+                worker_translator = create_translator(
+                    provider=provider, api_key=api_key, model=model, base_url=base_url, logger=logger
+                )
                 thread_state.translator = worker_translator
         return _translate_one_batch(
             batch_index=batch_index,
@@ -476,6 +493,7 @@ def _translate_batches(
             model=model,
             style=style,
             base_url=base_url,
+            provider=provider,
             logger=logger,
             label=label,
             translator=worker_translator,
@@ -503,12 +521,15 @@ def _translate_one_batch(
     model: str,
     style: str,
     base_url: str,
+    provider: str,
     logger: LogCallback | None,
     label: str,
     translator: TranslatorClient | None,
 ) -> _BatchResult:
-    client = translator or DeepSeekTranslator(api_key=api_key, model=model, base_url=base_url, logger=logger)
-    msg = f"DeepSeek batch {batch_index}/{batch_count}: {len(batch)} {label}."
+    client = translator or create_translator(
+        provider=provider, api_key=api_key, model=model, base_url=base_url, logger=logger
+    )
+    msg = f"Translation API batch {batch_index}/{batch_count}: {len(batch)} {label}."
     _log.info(msg)
     if logger:
         logger(msg)

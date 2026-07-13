@@ -75,6 +75,20 @@ class CredentialStoreTests(unittest.TestCase):
             credential_store.save_api_key("")
             self.assertEqual(credential_store.load_api_key(), "")
 
+    def test_credentials_are_separated_by_provider(self) -> None:
+        from ftb_translater import credential_store
+
+        with patch.object(credential_store, "_keyring_available", return_value=False):
+            credential_store.save_api_key("sk-openai", "openai_compatible")
+            credential_store.save_api_key("sk-deepl", "deepl")
+
+            self.assertEqual(credential_store.load_api_key("openai_compatible"), "sk-openai")
+            self.assertEqual(credential_store.load_api_key("deepl"), "sk-deepl")
+            self.assertNotEqual(
+                credential_store._fallback_path("openai_compatible"),
+                credential_store._fallback_path("deepl"),
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

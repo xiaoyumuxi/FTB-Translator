@@ -9,4 +9,6 @@ history.sqlite3
 *.egg-info/
 build/
 dist/
+node_modules/
+src-tauri/target/
 *.spec

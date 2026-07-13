@@ -15,18 +15,27 @@ from ftb_translater.config import (
     BATCH_SIZE_KEY,
     CONCURRENCY_KEY,
     MODEL_KEY,
+    PROVIDER_KEY,
     STYLE_KEY,
     load_config_values,
     migrate_api_key_from_env,
     save_config_values,
 )
-from ftb_translater.deepseek_client import DEFAULT_BASE_URL, DEFAULT_MODEL, DEFAULT_STYLE, DeepSeekTranslator
+from ftb_translater.deepseek_client import DEFAULT_BASE_URL, DEFAULT_MODEL, DEFAULT_STYLE
 from ftb_translater.format_guard import protect_text, repair_translation_format, restore_text, preserved_token_warnings
 from ftb_translater.history_db import FileRecord, HistoryDB, RunSummary
 from ftb_translater.report import TranslationReport
 from ftb_translater.chapters import count_chapter_segments, replace_chapter_segments
 from ftb_translater.logger import get_logger, setup_logging
 from ftb_translater.paths import detect_source_mode, resolve_quests_dir, source_lang_path
+from ftb_translater.providers import (
+    DEFAULT_PROVIDER,
+    PROVIDER_LABELS,
+    create_translator,
+    normalize_provider,
+    provider_defaults,
+    provider_requires_api_key,
+)
 from ftb_translater.snbt import load_lang_snbt, write_lang_snbt
 from ftb_translater.translator import AUTO_BATCH_MAX_ENTRIES, AUTO_MAX_WORKERS, estimate_batches, translate_quests_auto
 
@@ -35,6 +44,7 @@ _log = get_logger(__name__)
 
 class _RunSettings(TypedDict):
     api_key: str
+    provider: str
     batch_size: int | None
     model: str
     style: str
@@ -74,9 +84,12 @@ class FtbTranslaterApp(ctk.CTk):
         migrate_api_key_from_env()
         config_values = load_config_values()
         self.selected_dir = ctk.StringVar()
-        self.api_key = ctk.StringVar(value=credential_store.load_api_key())
-        self.base_url = ctk.StringVar(value=config_values.get(BASE_URL_KEY) or DEFAULT_BASE_URL)
-        self.model = ctk.StringVar(value=config_values.get(MODEL_KEY) or DEFAULT_MODEL)
+        configured_provider = normalize_provider(config_values.get(PROVIDER_KEY) or DEFAULT_PROVIDER)
+        configured_base_url, configured_model = provider_defaults(configured_provider)
+        self.api_key = ctk.StringVar(value=credential_store.load_api_key(configured_provider))
+        self.provider_label = ctk.StringVar(value=PROVIDER_LABELS[configured_provider])
+        self.base_url = ctk.StringVar(value=config_values.get(BASE_URL_KEY) or configured_base_url)
+        self.model = ctk.StringVar(value=config_values.get(MODEL_KEY) or configured_model)
         self.style = ctk.StringVar(value=config_values.get(STYLE_KEY) or DEFAULT_STYLE)
         self.batch_size = ctk.StringVar(value=config_values.get(BATCH_SIZE_KEY) or "auto")
         self.max_workers = ctk.StringVar(value=config_values.get(CONCURRENCY_KEY) or "auto")
@@ -98,6 +111,7 @@ class FtbTranslaterApp(ctk.CTk):
         self.history_db = HistoryDB()
         self._history_cards: dict[int, ctk.CTkFrame] = {}
         self._build_ui()
+        self._sync_api_key_state()
         self._set_stage("idle")
         self.after(150, self._drain_queue)
 
@@ -460,31 +474,43 @@ class FtbTranslaterApp(ctk.CTk):
             font=ctk.CTkFont(size=12),
         ).grid(row=3, column=0, columnspan=3, sticky="ew", padx=16, pady=(0, 14))
 
-        service_panel = self._panel(content, "翻译服务", "默认使用 DeepSeek 兼容 OpenAI 接口，可替换为其他兼容服务")
+        service_panel = self._panel(content, "翻译服务", "支持 OpenAI 兼容接口和 DeepL 翻译 API")
         service_panel.grid(row=1, column=0, sticky="ew", pady=(0, 10))
         service_panel.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(
-            service_panel, text="API 地址", anchor="w",
+            service_panel, text="提供商", anchor="w",
             font=ctk.CTkFont(size=12), text_color=("#374151", "#C9D1D9"),
         ).grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 4))
-        ctk.CTkEntry(
-            service_panel, textvariable=self.base_url, height=36,
-            corner_radius=8, border_width=1, border_color=("#D0D7DE", "#30363D"),
+        ctk.CTkOptionMenu(
+            service_panel,
+            variable=self.provider_label,
+            values=list(PROVIDER_LABELS.values()),
+            command=self._change_provider,
+            height=36,
+            corner_radius=8,
         ).grid(row=3, column=0, columnspan=2, sticky="ew", padx=16, pady=(0, 12))
         ctk.CTkLabel(
-            service_panel, text="模型", anchor="w",
+            service_panel, text="API 地址", anchor="w",
             font=ctk.CTkFont(size=12), text_color=("#374151", "#C9D1D9"),
         ).grid(row=4, column=0, sticky="ew", padx=16, pady=(0, 4))
         ctk.CTkEntry(
+            service_panel, textvariable=self.base_url, height=36,
+            corner_radius=8, border_width=1, border_color=("#D0D7DE", "#30363D"),
+        ).grid(row=5, column=0, columnspan=2, sticky="ew", padx=16, pady=(0, 12))
+        ctk.CTkLabel(
+            service_panel, text="模型（DeepL 可保持 deepl）", anchor="w",
+            font=ctk.CTkFont(size=12), text_color=("#374151", "#C9D1D9"),
+        ).grid(row=6, column=0, sticky="ew", padx=16, pady=(0, 4))
+        ctk.CTkEntry(
             service_panel, textvariable=self.model, height=36,
             corner_radius=8, border_width=1, border_color=("#D0D7DE", "#30363D"),
-        ).grid(row=5, column=0, sticky="ew", padx=16, pady=(0, 14))
+        ).grid(row=7, column=0, sticky="ew", padx=16, pady=(0, 14))
         ctk.CTkButton(
             service_panel, text="恢复默认", width=80, height=32, corner_radius=8,
             command=self._reset_service_settings,
             fg_color=("#F3F4F6", "#21262D"), hover_color=("#E5E7EB", "#30363D"),
             text_color=("#374151", "#C9D1D9"),
-        ).grid(row=5, column=1, sticky="e", padx=(0, 16), pady=(0, 14))
+        ).grid(row=7, column=1, sticky="e", padx=(0, 16), pady=(0, 14))
 
         translate_panel = self._panel(content, "翻译参数", "批大小和并发可填 auto 使用自动策略，或填正整数手动控制")
         translate_panel.grid(row=2, column=0, sticky="ew", pady=(0, 10))
@@ -968,8 +994,9 @@ class FtbTranslaterApp(ctk.CTk):
 
         def worker():
             try:
-                selected_api_key, model, style, base_url = self._current_translator_settings(api_key)
-                translator = DeepSeekTranslator(
+                selected_api_key, provider, model, style, base_url = self._current_translator_settings(api_key)
+                translator = create_translator(
+                    provider=provider,
                     api_key=selected_api_key,
                     model=model,
                     base_url=base_url,
@@ -1030,8 +1057,9 @@ class FtbTranslaterApp(ctk.CTk):
 
         def worker():
             try:
-                selected_api_key, model, style, base_url = self._current_translator_settings(api_key)
-                translator = DeepSeekTranslator(
+                selected_api_key, provider, model, style, base_url = self._current_translator_settings(api_key)
+                translator = create_translator(
+                    provider=provider,
                     api_key=selected_api_key,
                     model=model,
                     base_url=base_url,
@@ -1203,28 +1231,57 @@ class FtbTranslaterApp(ctk.CTk):
         self.toggle_key_button.configure(text="隐藏" if self._key_visible else "显示")
 
     def _reset_service_settings(self) -> None:
-        self.base_url.set(DEFAULT_BASE_URL)
-        self.model.set(DEFAULT_MODEL)
-        self.settings_status.set("已恢复默认 DeepSeek 服务参数，点击保存全部后生效。")
+        base_url, model = provider_defaults(self._current_provider())
+        self.base_url.set(base_url)
+        self.model.set(model)
+        self.settings_status.set("已恢复当前提供商的默认参数，点击保存全部后生效。")
+
+    def _current_provider(self) -> str:
+        selected_label = self.provider_label.get()
+        for provider, label in PROVIDER_LABELS.items():
+            if label == selected_label:
+                return provider
+        return DEFAULT_PROVIDER
+
+    def _change_provider(self, _selected_label: str) -> None:
+        provider = self._current_provider()
+        base_url, model = provider_defaults(provider)
+        self.api_key.set(credential_store.load_api_key(provider))
+        self._sync_api_key_state()
+        self.base_url.set(base_url)
+        self.model.set(model)
+        if provider_requires_api_key(provider):
+            message = "请填写对应 API Key 后保存。"
+        else:
+            message = "该实验性网页接口不需要 API Key，并会自动限制并发。"
+        self.settings_status.set(f"已切换到 {PROVIDER_LABELS[provider]}，{message}")
+
+    def _sync_api_key_state(self) -> None:
+        state = "normal" if provider_requires_api_key(self._current_provider()) else "disabled"
+        self.key_entry.configure(state=state)
+        self.toggle_key_button.configure(state=state)
 
     def _current_style(self) -> str:
         text = self.style_text.get("1.0", "end").strip()
         return text or DEFAULT_STYLE
 
-    def _current_translator_settings(self, fallback_api_key: str) -> tuple[str, str, str, str]:
+    def _current_translator_settings(self, fallback_api_key: str) -> tuple[str, str, str, str, str]:
         settings = self._run_settings
         if settings is not None:
             return (
                 settings["api_key"] or fallback_api_key,
+                settings["provider"],
                 settings["model"],
                 settings["style"],
                 settings["base_url"],
             )
+        default_base_url, default_model = provider_defaults(self._current_provider())
         return (
             fallback_api_key,
-            self.model.get() or DEFAULT_MODEL,
+            self._current_provider(),
+            self.model.get() or default_model,
             self._current_style(),
-            self.base_url.get() or DEFAULT_BASE_URL,
+            self.base_url.get() or default_base_url,
         )
 
     def _parse_optional_positive_int(self, value: str, label: str) -> int | None:
@@ -1255,11 +1312,14 @@ class FtbTranslaterApp(ctk.CTk):
             return
 
         self.style.set(self._current_style())
-        credential_backend = credential_store.save_api_key(self.api_key.get())
+        provider = self._current_provider()
+        default_base_url, default_model = provider_defaults(provider)
+        credential_backend = credential_store.save_api_key(self.api_key.get(), provider)
         save_config_values(
             {
-                BASE_URL_KEY: self.base_url.get() or DEFAULT_BASE_URL,
-                MODEL_KEY: self.model.get() or DEFAULT_MODEL,
+                PROVIDER_KEY: provider,
+                BASE_URL_KEY: self.base_url.get() or default_base_url,
+                MODEL_KEY: self.model.get() or default_model,
                 STYLE_KEY: self.style.get() or DEFAULT_STYLE,
                 BATCH_SIZE_KEY: self.batch_size.get() or "auto",
                 CONCURRENCY_KEY: self.max_workers.get() or "auto",
@@ -1366,10 +1426,11 @@ class FtbTranslaterApp(ctk.CTk):
             self.settings_status.set(str(exc))
             messagebox.showerror("配置无效", str(exc))
             return
-        if not self.api_key.get().strip():
+        provider = self._current_provider()
+        if provider_requires_api_key(provider) and not self.api_key.get().strip():
             self._show_view("settings")
             self.settings_status.set("请先填写 API Key，然后点击保存全部。")
-            messagebox.showerror("缺少 API Key", "请填写 DeepSeek API Key。")
+            messagebox.showerror("缺少 API Key", "请填写当前翻译提供商的 API Key。")
             return
         mode = detect_source_mode(self._quests_dir)
         target = "lang/zh_cn.snbt" if mode == "lang" else "chapters/*.snbt"
@@ -1381,12 +1442,14 @@ class FtbTranslaterApp(ctk.CTk):
             _log.info("User cancelled the overwrite confirmation")
             return
         self._save_settings()
+        default_base_url, default_model = provider_defaults(provider)
         self._run_settings = {
             "api_key": self.api_key.get(),
+            "provider": provider,
             "batch_size": batch_size,
-            "model": self.model.get() or DEFAULT_MODEL,
+            "model": self.model.get() or default_model,
             "style": self._current_style(),
-            "base_url": self.base_url.get() or DEFAULT_BASE_URL,
+            "base_url": self.base_url.get() or default_base_url,
             "max_workers": max_workers,
         }
         self.scan_button.configure(state="disabled")
@@ -1423,6 +1486,7 @@ class FtbTranslaterApp(ctk.CTk):
                 model=settings["model"],
                 style=settings["style"],
                 base_url=settings["base_url"],
+                provider=settings["provider"],
                 max_workers=settings["max_workers"],
                 progress=progress,
                 logger=logger,
