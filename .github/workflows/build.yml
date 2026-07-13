@@ -5,6 +5,8 @@ on:
   push:
     branches: [main, master]
     tags: ["v*"]
+  release:
+    types: [published]
   workflow_dispatch:
 
 concurrency:
@@ -42,7 +44,10 @@ jobs:
   package:
     name: Package (${{ matrix.os }})
     needs: test
-    if: github.event_name != 'pull_request'
+    if: >-
+      github.event_name == 'release' ||
+      github.event_name == 'workflow_dispatch' ||
+      startsWith(github.ref, 'refs/tags/v')
     strategy:
       fail-fast: false
       matrix:
@@ -73,7 +78,7 @@ jobs:
     name: Publish GitHub release
     needs: package
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
     steps:
@@ -83,4 +88,6 @@ jobs:
           merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
-          files: release-artifacts/*
+          tag_name: ${{ github.event.release.tag_name || github.ref_name }}
+          files: release-artifacts/**/*
+          fail_on_unmatched_files: true
