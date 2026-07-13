@@ -1,199 +1,225 @@
 # FTB Translater
 
-FTB Translater 是一个用于汉化现代 FTB Quests 任务文本的桌面工具，支持 OpenAI 兼容接口、DeepL 官方 API，以及无需 API Key 的实验性网页翻译接口。目前固定支持 `en_us -> zh_cn`。
+用于汉化现代 FTB Quests 任务文本的桌面工具，基于 Rust + Tauri 构建，支持 OpenAI 兼容接口、DeepL 官方 API，以及无需 API Key 的 Google/DeepL 网页翻译。固定翻译方向：`en_us → zh_cn`。
+
+默认翻译服务为免 API Key 的 Google 网页翻译。DeepSeek / OpenAI 兼容接口、DeepL 官方 API 和 DeepL 网页翻译仍可在设置中切换；内置 Minecraft/模组词表是 API 模式的可选增强项，默认关闭。
+
+## 翻译模式与配置
+
+设置页不会向所有提供商展示同一套表单，而是按提供商能力组合配置：
+
+| 配置项 | Google 网页 | DeepL 网页 | DeepL 官方 API | DeepSeek / OpenAI 兼容 |
+|---|:---:|:---:|:---:|:---:|
+| API Key | — | — | Authentication Key | API Key |
+| 接口地址 | — | — | Free / Pro 地址 | 可配置兼容地址 |
+| 模型与翻译要求 | — | — | — | 可配置 |
+| Minecraft/模组词表 | — | — | 可选 | 可选 |
+| 批大小与并发 | 内置安全策略 | 内置安全策略 | 可配置 | 可配置 |
+
+Google 网页翻译是默认模式，无需任何 Key。DeepL 网页模式同样免 Key，但属于实验性匿名接口。DeepL 官方 API 默认使用 Free 地址，Pro 用户可以改成 `https://api.deepl.com`。DeepSeek/OpenAI 兼容模式默认指向 DeepSeek，也可以填写其他兼容服务。
+
+## 运行方法
+
+### 从源码启动
+
+需要 Node.js 20+、Rust stable 和 [Tauri 2 对应的系统依赖](https://tauri.app/start/prerequisites/)。
+
+```bash
+npm install
+npm run tauri dev
+```
+
+默认 Google 网页模式不需要额外环境变量或 API Key。若使用 DeepL 官方 API 或 DeepSeek/OpenAI 兼容模式，请在应用的“服务设置”中填写凭证，不要把 Key 写入项目文件。
+
+### 实际使用流程
+
+1. 打开“服务设置”，选择翻译提供商并保存。首次运行可以直接保留默认的 Google 网页翻译。
+2. 回到“翻译工作台”，选择整合包根目录，或直接选择 `config/ftbquests/quests`、`lang`、`chapters` 目录。
+3. 点击“扫描任务书”，确认识别出的格式、文件数和待翻译条目数。
+4. 点击“开始汉化”。程序会先创建完整备份，再翻译并写回内容。
+5. 完成后检查格式告警与人工修正列表。网页翻译只能作为机器初译，发布前应进行术语和语义审校。
+
+### 构建安装包
+
+```bash
+npm run tauri -- build
+```
+
+构建产物位于 `src-tauri/target/release/bundle/`。
 
 ## 功能
 
-- 支持新版语言文件：`config/ftbquests/quests/lang/en_us.snbt`
-- 支持章节式任务文件：`config/ftbquests/quests/chapters/*.snbt`
-- `lang` 模式写入或覆盖 `lang/zh_cn.snbt`
-- `chapters` 模式原地改写 `chapters/*.snbt` 中可翻译文本字段
-- 写入前自动备份 `lang` 或 `chapters` 目录
-- 生成翻译缓存、报告、备份和可导出的翻译历史
+- 支持两种模式：语言文件（`lang/en_us.snbt`）和章节文件（`chapters/*.snbt`）
+- 自动识别整合包目录结构，无需手动定位文件
+- 翻译前自动备份原始文件
+- 官方 API 支持批量并发，网页翻译以大批次、低并发方式减少匿名请求
+- 可选的版本化 Minecraft/模组词表，默认关闭；切换到 API 模式后可按需启用
+- 翻译缓存、JSON 报告、SQLite 历史与 ZIP 导出
+- 格式安全保护 + 人工修正页（见下方原理）
+- API Key 存入系统密钥管理器；应用启动、切换服务和修改普通设置不会读取钥匙串，只有明确查看/修改 Key 或实际翻译需要 Key 时才按需读取一次，并在当前应用会话中复用
+- 浅色/深色主题，响应式桌面布局
+- 纯 Rust，运行时不依赖 Python 或任何 sidecar
 
-## 安装
+## 工作原理
 
-需要 Python 3.11 或更高版本。
+### 1. 文件解析
 
-```powershell
-python -m pip install -e .
+工具支持两种文件格式，分别对应 FTB Quests 的两种任务书结构：
+
+- **lang 模式**：解析 `lang/en_us.snbt`，这是一个类 JSON 的 SNBT 格式文件，值可以是字符串或字符串数组（多行描述）。工具自己实现了 SNBT 解析器（`snbt.rs`），保留键的原始顺序，写出时也生成合法 SNBT。
+- **chapters 模式**：遍历 `chapters/*.snbt`，从每个章节文件中提取可翻译的字符串字段（任务标题、描述等）。
+
+### 2. Token 保护
+
+翻译前，每条原文会经过一道**占位符替换**流程（`core.rs::protect`）：
+
+用正则匹配以下模式，将它们替换为 `⟨P_0⟩`、`⟨P_1⟩`…… 形式的不透明占位符：
+
+| 类型 | 示例 |
+|------|------|
+| Minecraft 颜色/格式码 | `&e`、`§6`、`§k` |
+| printf 格式占位符 | `%s`、`%1$d` |
+| 尖括号标签 | `<item:minecraft:stone>` |
+| 花括号宏 | `{@player}`、`{amount}` |
+| 资源/路径标识符 | `assets/mod/textures/a.png`、`kubejs:items/foo` |
+| 转义序列 | `\n`、`\t`、`\\` |
+| URL | `https://...` |
+| 十六进制颜色 | `#FF5733` |
+
+保护后的文本只包含自然语言和占位符，例如：
+
+```
+Use &eGold Ingot&r on <item:minecraft:gold_ingot>
+→ Use ⟨P_0⟩Gold Ingot⟨P_1⟩ on ⟨P_2⟩
 ```
 
-也可以使用 uv：
+被保护的 token 列表与原文一起保存，翻译后用于恢复。
 
-```powershell
-uv sync --dev
+### 3. 批量并发翻译
+
+待翻译条目按 `batch_size`（默认 25）分批。OpenAI 兼容接口和 DeepL 官方 API 可使用 `concurrency` 并发请求（默认 6，上限 12）；匿名网页接口固定低并发，通过增大单次请求减少 HTTP 调用：
+
+- Google 网页翻译：使用不可翻译批次标记，一次 POST 尽量装入约 4500 字符，返回后按标记拆回原条目。
+- DeepL 网页翻译：一次请求使用文本数组装入约 1500 字符，符合匿名端点限制。
+- 超长单条文本会在标点或空白附近拆分，并避免切断 `⟨P_N⟩` 占位符。
+
+OpenAI 兼容模式下，每批以 JSON 对象形式发送，键是条目 ID，值是保护后的文本。模型被要求：
+- 保持键集合不变
+- 不修改任何 `⟨P_N⟩` 占位符
+- 返回同结构的 JSON 对象
+
+所有提供商请求失败时最多重试 3 次，间隔递增。整批失败时，该批所有条目回退为原文。网页接口不是官方稳定 API，服务端限流或接口变化都可能导致暂时不可用。
+
+### Google 网页翻译全量实测
+
+以下数据来自一次真实的端到端运行，不是理论估算。测试于 2026-07-13 使用 StoneBlock 4 `1.15.3` 的完整 `lang/en_us.snbt` 进行，初始缓存为空，全程使用免 API Key 的 Google 网页翻译，未使用 DeepSeek。
+
+| 指标 | 实测结果 |
+|------|----------|
+| 原始语言文件 | 440,833 字节、7,145 行 |
+| 解析后的翻译条目 | 2,515 条 |
+| Core 批大小 | 250 条/批 |
+| Google 单次请求上限 | 尽量装满约 4,500 字符 |
+| 配置并发数 | 8 |
+| 网页提供商有效并发数 | **1**（安全上限强制收敛） |
+| 总耗时 | **209.09 秒**（约 3 分 29 秒） |
+| 平均处理速度 | **12.03 条/秒** |
+| 接口级成功 | **2,515 / 2,515（100%）** |
+| 接口级失败 | **0 / 2,515（0%）** |
+| 格式守卫拦截并回退 | **14 / 2,515（0.56%）** |
+| 格式守卫通过 | **2,501 / 2,515（99.44%）** |
+| 输出文件 | 427,139 字节、7,457 行，SNBT 重新解析通过 |
+
+这里的“接口级成功”只表示接口为条目返回了结果；“格式守卫通过”只表示当前规则没有发现换行、格式码、占位符、资源标识或 JSON 结构异常。两者都**不代表翻译语义准确，也不代表译文适合直接发布**。14 条被当前守卫发现的异常译文会自动回退英文原文，并写入人工修正报告。
+
+配置中的并发数为 8，但匿名 Google/DeepL 网页端点在程序内固定限制为有效并发 1。全量实测表明，在单并发下通过约 4,500 字符的大请求批处理，已经能在约三分半内处理 2,515 个真实条目。更高并发容易触发匿名服务限流，也会放大批次标记被改写或响应不完整的风险。实际耗时仍会随网络、文本长度和服务端状态变化；此数据应视为一次可复现的参考基准，而不是稳定性承诺。
+
+#### 翻译准确度审计
+
+在上述全量运行后，又对 2,515 个 key、5,789 个文本片段进行了独立质量审计。所有条目均经过程序化风险扫描，并人工复核了固定随机样本、全部富文本组件、全部原文未变化片段、全部同源异译组和高风险术语项，合计约 350 个不同片段。以下准确度比例是基于全量扫描与人工复核的**估算值**，合理误差约为 ±5–7 个百分点：
+
+| 准确度等级 | 估算比例 | 含义 |
+|------------|----------|------|
+| A | 约 48% | 语义正确，术语和表达基本可直接使用 |
+| B | 约 29% | 大意正确，但存在明显机翻腔、术语或一致性问题 |
+| C | 约 18% | 关键术语、信息关系或动作对象错误，需要重译 |
+| D | 约 5% | 未翻译、内容损坏、严重幻觉或富文本无法解析 |
+| 严格可发布准确率 | **约 45%–55%** | 未经进一步审校时可直接公开发布的估算范围 |
+
+全量扫描确认的主要问题包括：
+
+- 44 条 JSON 富文本组件中有 19 条目标内容无法作为 JSON 解析，占 **43.2%**；多数没有被现有格式守卫拦截。
+- 52 个有意义的英文片段完全未译，涉及 26 个 key；其中至少 12 个 key 未被报告标记。
+- 相同英文原文出现不同译法，共 30 组。
+- `item/items` 被误译为“项目”至少 71 处，能量语境中的 `power` 被译为“电源”至少 32 处，普通方块 `block/blocks` 被译为“区块”至少 27 处。
+- `enchanting` 被译为“迷人”至少 11 处，`vanilla` 被译为“香草”至少 8 处。
+- `Mekanism`、`StoneBlock 4`、`Draconic Evolution` 等模组或整合包名称被按普通英语直译，且同一术语存在多套译名。
+
+因此，这次 Google 网页翻译结果应定位为**机器初译草稿，不适合直接发布**。当前 99.44% 数据只能用于衡量现有格式守卫的通过情况，不能作为翻译准确率。正式发布前至少需要加入 Minecraft/模组术语表、从模组 `zh_cn.json` 复用官方译名、对 JSON 富文本只翻译允许的展示字段，并进行第二阶段语义审校。完整方法、统计和具体错译案例见 [`docs/translation-accuracy-audit.md`](docs/translation-accuracy-audit.md)。
+
+### 4. Token 恢复与校验
+
+API 返回后，每条译文经过两步处理：
+
+**恢复**：将 `⟨P_N⟩` 替换回对应的原始 token。
+
+**校验**（`core.rs::warnings`）：对恢复后的译文与原文做以下比较：
+- 换行、回车、制表符数量是否一致
+- 保护 token 集合（排序后）是否完全一致——即没有缺失、没有多余
+- 如果原文是 JSON 文本组件，校验译文的 JSON 结构（除 `"text"` 字段外的键和类型）是否不变
+
+**校验失败**：该条译文**不写入**，原文被保留，条目进入「人工修正」列表。校验通过的译文才写入文件并存入缓存。
+
+### 5. 翻译缓存
+
+每条成功通过校验的翻译以 SHA-256 散列为键存入 `cache.json`。散列输入包含原文、提供商标识、模型/接口和风格提示，保证不同服务之间缓存不复用；原有 OpenAI/DeepSeek 缓存保持兼容。下次翻译同一整合包时，命中缓存的条目直接跳过请求。
+
+### 6. 可选 Minecraft/模组词表
+
+切换到 DeepL 官方 API 或 DeepSeek/OpenAI 兼容模式后，设置页可以手动开启词表。词表默认关闭；Google/DeepL 网页模式不显示该设置，后端也会强制关闭词表。
+
+开启后，工具会先保护颜色码、URL、资源路径等格式 token，再按最长词优先和英文单词边界匹配术语，将命中的词替换为 `⟨G_N⟩` 占位符。翻译服务只处理剩余自然语言，返回后工具把占位符恢复成词表中的统一中文。这个机制适用于 DeepSeek、OpenAI 兼容接口和 DeepL 官方 API；它是应用本地的术语保护层，不是 DeepL 官方 Glossary 功能，也不依赖模型提示词。
+
+首次运行时，程序会把 [`src-tauri/resources/minecraft_glossary.json`](src-tauri/resources/minecraft_glossary.json) 作为初始模板复制到应用数据目录。设置页会显示这份可编辑 JSON 的完整路径，用户可以直接修改文件、手动输入其他路径、通过文件选择器切换自定义词表，或恢复默认路径。已有的用户词表不会被后续启动覆盖。
+
+初始词表覆盖 600+ 个条目，面向常见整合包而不是单个整合包定制。除 Minecraft 通用术语外，还覆盖新旧版本常见的技术与自动化、存储与物流、魔法、冒险与维度、农业与食物、建筑和任务辅助模组，并收录这些生态中容易被通用翻译引擎误译的机器与机制短语。译名优先采用中文社区通行名称；没有稳定中文名的专名保留英文。
+
+对于 `Create`、`Carry On`、`Controlling`、`Artifacts`、`Spectrum` 等同时也是普通英文词的模组名，词表只收录带 `mod` 的明确写法或更完整的模组内术语，避免把普通句子中的动词、形容词和名词误替换成模组名称。
+
+旧版 220 条词表曾在 StoneBlock 4 `1.15.3` 中命中 103 条、保护 1,295 处术语；该结果仅作为历史基线。当前词表已改为跨整合包覆盖，实际命中率应针对目标整合包重新扫描，且命中率本身不代表语义准确率。
+
+词表开关和所选 JSON 文件的 SHA-256 内容指纹都会参与缓存键计算，因此启用/禁用词表、修改文件或切换路径都不会误用旧译文缓存。保存设置和开始翻译时会校验 JSON 结构、空条目和重复术语。词表是用于兜底术语一致性的增强层，不能替代语义审校。
+
+### 7. 写回与备份
+
+写入前先将原始 `lang` 或 `chapters` 目录整体备份到 `.ftb-translater/backups/<时间戳>/`。
+
+- lang 模式：写出 `lang/zh_cn.snbt`，写前再次解析验证格式合法。
+- chapters 模式：按原文件路径就地修改各章节文件中的对应字段。
+
+---
+
+## 数据位置
+
+应用设置、可编辑的默认 `minecraft_glossary.json` 和历史数据库保存到系统应用数据目录（`AppData`/`Application Support`/`~/.local/share`）。
+
+每个任务书的运行数据保存在整合包目录内：
+
+```
+config/ftbquests/quests/.ftb-translater/
+├── cache.json               # 翻译缓存（以 SHA-256 为键）
+├── report-latest.json       # 最近一次运行的完整报告
+└── backups/YYYYMMDD-HHMMSS/ # 翻译前的自动备份
 ```
 
-## 运行
+---
 
-```powershell
-python main.py
-```
+## 开发验证
 
-安装为可执行脚本后也可以运行：
+```bash
+# Rust 单元测试
+cargo test --manifest-path src-tauri/Cargo.toml
 
-```powershell
-ftb-translater
-```
-
-启动后选择整合包目录即可。也可以直接选择它下面的 `config`、`config/ftbquests`、`config/ftbquests/quests`、`lang` 或 `chapters` 目录，程序会自动定位 FTB Quests 任务目录。
-
-## 配置
-
-右上角“设置”里可以选择翻译提供商、填写对应 API Key 和翻译参数。
-
-API Key 优先保存到系统凭证管理器：
-
-- macOS：钥匙串
-- Windows：凭据管理器
-- Linux：Secret Service
-
-如果系统凭证后端不可用，程序会回退到本地受限文件，避免把 API Key 明文写入 `.env`。旧版本 `.env` 里的 `DEEPSEEK_API_KEY` 会在启动时尝试迁移到新存储。
-
-设置面板还可以配置：
-
-- 翻译提供商：`FTB_TRANSLATER_PROVIDER`，可选 `openai_compatible`、`deepl`、`google_web` 或 `deepl_web`
-- API 地址：`DEEPSEEK_BASE_URL`（沿用旧配置名以保持兼容）
-- 模型名：`DEEPSEEK_MODEL`（DeepL 模式保持 `deepl` 即可）
-- 翻译风格：`FTB_TRANSLATER_STYLE`
-- 批大小：`FTB_TRANSLATER_BATCH_SIZE`，填 `auto` 使用自动策略
-- 并发数：`FTB_TRANSLATER_CONCURRENCY`，填 `auto` 使用自动策略
-
-手动指定并发数也可以使用环境变量：
-
-```powershell
-$env:FTB_TRANSLATER_CONCURRENCY=6
-```
-
-恢复自动调节：
-
-```powershell
-$env:FTB_TRANSLATER_CONCURRENCY=auto
-```
-
-## 翻译流程
-
-1. 选择整合包或 FTB Quests 目录。
-2. 点击扫描，确认程序识别到 `lang` 或 `chapters` 模式。
-3. 点击开始汉化。
-4. 程序会先弹窗确认覆盖写入，然后创建备份。
-5. 翻译完成后可以查看日志、报告和历史记录。
-
-程序会自动切分翻译请求，并根据任务规模选择保守的并发数。翻译时日志区域会显示 API 调用、批次进度、备份创建和覆盖写入目标。
-
-OpenAI 兼容模式默认使用 DeepSeek，也可以填写 OpenAI、OpenRouter、硅基流动或中转服务的 Base URL 与模型名。如果服务不支持 `response_format=json_object`，程序会自动回退到仅通过提示词约束 JSON，并兼容 Markdown 代码块包裹的 JSON 返回值。
-
-DeepL 模式默认使用 Free API 地址 `https://api-free.deepl.com`；Pro 账号可改为 `https://api.deepl.com`。DeepL 不使用翻译风格和模型参数。
-
-Google 和 DeepL 网页翻译模式不需要 API Key。它们调用的是网站或浏览器扩展使用的匿名接口，不属于官方稳定 API，因此程序会强制使用低并发、失败重试和本地缓存。Google 会用不可翻译的批次标记在一次 POST 中装入约 4500 字符，DeepL 会按匿名端点限制在一次请求中装入约 1500 字符。服务端限流、鉴权规则或接口格式随时可能变化；调用失败时程序会保留原文，不应将网页模式视为有可用性保证的服务。
-
-如果翻译 API 返回的译文丢失受保护格式，该条译文会被丢弃并保留原文。当前保护内容包括：
-
-- FTB / Minecraft 格式码，例如 `&e`、`&r`、`§a`
-- 占位符，例如 `%s`、`%1$s`
-- 物品或标签 token，例如 `<item:minecraft:stone>`、`#forge:ingots/iron`
-- 字面转义序列，例如 `\n`、`\t`
-- 实际换行和制表符数量
-
-## 输出
-
-翻译会写入或更新：
-
-- `config/ftbquests/quests/lang/zh_cn.snbt`，或 `config/ftbquests/quests/chapters/*.snbt`
-- `config/ftbquests/quests/.ftb-translater/cache.json`
-- `config/ftbquests/quests/.ftb-translater/report-latest.json`
-- `config/ftbquests/quests/.ftb-translater/backups/YYYYMMDD-HHMMSS/`
-- 当前运行目录下的 `history.sqlite3`
-
-`report-latest.json` 包含本次翻译摘要、失败项、格式告警和中英映射。完整输出文件内容保存在历史数据库中，用于后续导出。
-
-## 翻译历史
-
-右上角“历史”入口会列出已保存的翻译记录。每条记录包含整合包路径、模式、模型、条目数、失败数、告警数和缓存命中数。
-
-历史数据库保存在当前运行目录的 `history.sqlite3`。从源码目录执行 `python main.py` 时，数据库会出现在项目根目录；从其他目录启动时，数据库会出现在对应的当前工作目录。
-
-历史页面支持导出 ZIP：
-
-- `lang` 模式导出 `lang/zh_cn.snbt`
-- `chapters` 模式导出 `chapters/*.snbt`
-- ZIP 内附带 `manifest.json`
-
-## 测试
-
-普通测试组：
-
-```powershell
-python -m tests.run_groups unit
-```
-
-或直接运行完整普通测试发现：
-
-```powershell
-uv run python -m unittest discover -s tests -p "test_*.py"
-```
-
-完整流程测试组：
-
-```powershell
-python -m tests.run_groups e2e
-```
-
-完整流程测试会启用真实 live 测试开关。它会下载真实 CurseForge 整合包 zip，先用假翻译器跑一遍真实下载处理流程，再抽样调用真实 DeepSeek API 跑一遍付费端到端流程。
-
-真实 DeepSeek 测试的输出目录：
-
-```text
-.ftb-translater/e2e-runs/YYYYMMDD-HHMMSS/
-```
-
-其中 `summary.txt` 会列出 `zh_cn.snbt`、`report-latest.json`、`cache.json` 和备份目录的完整路径。
-
-指定测试用整合包：
-
-```powershell
-$env:FTB_TRANSLATER_CURSEFORGE_URL="https://edge.forgecdn.net/files/1234/567/your-pack.zip"
-$env:FTB_TRANSLATER_LIVE_MAX_MB=500
-```
-
-调整真实 DeepSeek 测试抽样条目数：
-
-```powershell
-$env:FTB_TRANSLATER_LIVE_DEEPSEEK_ENTRIES=20
-```
-
-安装为可执行脚本后也可以使用：
-
-```powershell
-ftb-test
-ftb-test-e2e
-```
-
-## CI/CD
-
-GitHub Actions 工作流在 `.github/workflows/build.yml`：
-
-- PR：在 Ubuntu、Windows、macOS 上运行本地单元测试。
-- 推送到 `main` / `master`：先运行测试，再构建 Windows exe 和 macOS dmg，并上传为 workflow artifacts。
-- 推送 `v*` tag：构建成功后自动把安装包发布到 GitHub Release。
-- 手动触发：可以勾选 `run_live_e2e` 运行真实 CurseForge 下载和 DeepSeek 端到端测试。
-
-发布版本示例：
-
-```powershell
-git tag v0.1.1
-git push origin v0.1.1
-```
-
-手动 live e2e 需要在仓库 Secrets 中配置：
-
-- `DEEPSEEK_API_KEY`：真实 DeepSeek API Key。未配置时 DeepSeek 付费测试会跳过。
-- `FTB_TRANSLATER_CURSEFORGE_URL`：可选，直接指向 CurseForge / ForgeCDN `.zip` 文件；未配置时使用测试默认整合包。
-
-本地 CI 同款检查：
-
-```powershell
-uv sync --dev --locked
-uv run python -m tests.run_groups unit
+# TypeScript 检查与前端构建
+npm run build
 ```
