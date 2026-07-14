@@ -95,7 +95,10 @@ pub fn extract(path: &Path) -> Result<Vec<Segment>, String> {
     }
     Ok(out)
 }
-pub fn replace(path: &Path, replacements: &[(usize, String)]) -> Result<usize, String> {
+pub fn render_replacements(
+    path: &Path,
+    replacements: &[(usize, String)],
+) -> Result<(String, usize), String> {
     let mut text = fs::read_to_string(path).map_err(|e| e.to_string())?;
     let segs = extract(path)?;
     let mut matches = segs
@@ -111,8 +114,12 @@ pub fn replace(path: &Path, replacements: &[(usize, String)]) -> Result<usize, S
     for (s, t) in &matches {
         text.replace_range(s.start..s.end, &quote(t, s.quote));
     }
+    Ok((text, matches.len()))
+}
+pub fn replace(path: &Path, replacements: &[(usize, String)]) -> Result<usize, String> {
+    let (text, count) = render_replacements(path, replacements)?;
     fs::write(path, text).map_err(|e| e.to_string())?;
-    Ok(matches.len())
+    Ok(count)
 }
 
 #[cfg(test)]

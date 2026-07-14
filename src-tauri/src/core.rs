@@ -50,6 +50,12 @@ struct Item {
     tokens: Vec<(String, String)>,
 }
 
+struct FileOutput {
+    path: PathBuf,
+    archive_name: String,
+    content: String,
+}
+
 fn has_lang(p: &Path) -> bool {
     p.join("lang/en_us.snbt").is_file()
 }
@@ -313,6 +319,52 @@ fn backup(q: &Path, m: &str) -> Result<PathBuf, String> {
     }
     Ok(root)
 }
+fn restore_outputs(snapshots: &[(PathBuf, Option<Vec<u8>>)]) -> Vec<String> {
+    snapshots
+        .iter()
+        .rev()
+        .filter_map(|(path, original)| {
+            let result = match original {
+                Some(content) => fs::write(path, content),
+                None => match fs::remove_file(path) {
+                    Ok(()) => Ok(()),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                    Err(error) => Err(error),
+                },
+            };
+            result
+                .err()
+                .map(|error| format!("{}：{error}", path.display()))
+        })
+        .collect()
+}
+fn commit_outputs(outputs: &[FileOutput]) -> Result<(), String> {
+    let snapshots = outputs
+        .iter()
+        .map(|output| match fs::read(&output.path) {
+            Ok(content) => Ok((output.path.clone(), Some(content))),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok((output.path.clone(), None))
+            }
+            Err(error) => Err(format!("无法读取 {}：{error}", output.path.display())),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    for (index, output) in outputs.iter().enumerate() {
+        if let Err(error) = fs::write(&output.path, &output.content) {
+            let rollback_errors = restore_outputs(&snapshots[..=index]);
+            let rollback = if rollback_errors.is_empty() {
+                "已恢复此前写入的文件".to_string()
+            } else {
+                format!("恢复失败：{}", rollback_errors.join("；"))
+            };
+            return Err(format!(
+                "无法写入 {}：{error}；{rollback}",
+                output.path.display()
+            ));
+        }
+    }
+    Ok(())
+}
 async fn request(
     client: &Client,
     s: &Settings,
@@ -478,7 +530,7 @@ pub async fn translate(app: AppHandle, data_dir: PathBuf, payload: Value) -> Res
             cache.insert(cache_key(&x.source, &settings), translated.clone());
         }
     }
-    let mut outputs = vec![];
+    let mut pending_outputs = vec![];
     let (source_file, target_file) = if let Some(mut map) = lang {
         for (k, v) in &mut map {
             if let Some(t) = results.get(k) {
@@ -491,9 +543,13 @@ pub async fn translate(app: AppHandle, data_dir: PathBuf, payload: Value) -> Res
             }
         }
         let target = q.join("lang/zh_cn.snbt");
-        snbt::write(&target, &map)?;
-        let content = fs::read_to_string(&target).map_err(|e| e.to_string())?;
-        outputs.push(("lang/zh_cn.snbt".into(), content, json!({})));
+        let content = snbt::dump(&map);
+        snbt::parse(&content)?;
+        pending_outputs.push(FileOutput {
+            path: target.clone(),
+            archive_name: "lang/zh_cn.snbt".into(),
+            content,
+        });
         (q.join("lang/en_us.snbt"), target)
     } else {
         let mut by_file: HashMap<PathBuf, Vec<(usize, String)>> = HashMap::new();
@@ -504,15 +560,20 @@ pub async fn translate(app: AppHandle, data_dir: PathBuf, payload: Value) -> Res
                 .push((s.index, results[&s.cache_id].clone()));
         }
         for (file, r) in by_file {
-            chapters::replace(&file, &r)?;
-            outputs.push((
-                format!("chapters/{}", file.file_name().unwrap().to_string_lossy()),
-                fs::read_to_string(file).map_err(|e| e.to_string())?,
-                json!({}),
-            ));
+            let (content, _) = chapters::render_replacements(&file, &r)?;
+            pending_outputs.push(FileOutput {
+                archive_name: format!("chapters/{}", file.file_name().unwrap().to_string_lossy()),
+                path: file,
+                content,
+            });
         }
         (q.join("chapters"), q.join("chapters"))
     };
+    commit_outputs(&pending_outputs)?;
+    let outputs = pending_outputs
+        .into_iter()
+        .map(|output| (output.archive_name, output.content, json!({})))
+        .collect::<Vec<_>>();
     save_cache(&q, &cache)?;
     let report = Report {
         source_file: source_file.display().to_string(),
@@ -544,8 +605,8 @@ pub async fn translate(app: AppHandle, data_dir: PathBuf, payload: Value) -> Res
 pub fn save_review(v: &Value) -> Result<Value, String> {
     let target = PathBuf::from(v["target_file"].as_str().unwrap_or(""));
     let key = v["key"].as_str().unwrap_or("");
-    let text = v["text"].as_str().unwrap_or("").trim();
-    if text.is_empty() {
+    let text = v["text"].as_str().unwrap_or("");
+    if text.trim().is_empty() {
         return Err("译文不能为空".into());
     }
     if target.is_file() {
@@ -554,7 +615,10 @@ pub fn save_review(v: &Value) -> Result<Value, String> {
             .iter_mut()
             .find(|x| x.0 == key)
             .ok_or("目标文件中找不到此条目")?;
-        entry.1 = LangValue::Text(text.into());
+        entry.1 = match &entry.1 {
+            LangValue::Text(_) => LangValue::Text(text.into()),
+            LangValue::Lines(_) => LangValue::Lines(text.split('\n').map(str::to_string).collect()),
+        };
         snbt::write(&target, &map)?;
     } else {
         let p = key.splitn(3, ':').collect::<Vec<_>>();
@@ -649,5 +713,51 @@ mod tests {
         let result = scan(&json!({"path":d.path(),"batch_size":"auto"})).unwrap();
         assert_eq!(result["entry_count"], 1);
         assert_eq!(result["mode"], "lang");
+    }
+
+    #[test]
+    fn review_preserves_language_line_arrays() {
+        let d = tempdir().unwrap();
+        let target = d.path().join("zh_cn.snbt");
+        fs::write(
+            &target,
+            r#"{ "description": ["First line", "Second line"] }"#,
+        )
+        .unwrap();
+
+        save_review(&json!({
+            "target_file": target,
+            "key": "description",
+            "text": "第一行\n第二行"
+        }))
+        .unwrap();
+
+        let map = snbt::load(&target).unwrap();
+        assert_eq!(
+            map[0].1,
+            LangValue::Lines(vec!["第一行".into(), "第二行".into()])
+        );
+    }
+
+    #[test]
+    fn failed_output_write_restores_already_written_files() {
+        let d = tempdir().unwrap();
+        let first = d.path().join("first.snbt");
+        fs::write(&first, "original").unwrap();
+        let outputs = vec![
+            FileOutput {
+                path: first.clone(),
+                archive_name: "first.snbt".into(),
+                content: "translated".into(),
+            },
+            FileOutput {
+                path: d.path().join("missing/second.snbt"),
+                archive_name: "second.snbt".into(),
+                content: "translated".into(),
+            },
+        ];
+
+        assert!(commit_outputs(&outputs).is_err());
+        assert_eq!(fs::read_to_string(first).unwrap(), "original");
     }
 }

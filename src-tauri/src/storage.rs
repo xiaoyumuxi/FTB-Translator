@@ -105,11 +105,14 @@ pub fn translation_api_key(provider: &str) -> Result<String, String> {
     Ok(value)
 }
 pub fn load_settings(dir: &Path) -> Settings {
-    let mut s = Settings::default();
-    s.glossary_path = crate::glossary::ensure_default(dir)
+    let glossary_path = crate::glossary::ensure_default(dir)
         .unwrap_or_else(|_| crate::glossary::default_path(dir))
         .display()
         .to_string();
+    let mut s = Settings {
+        glossary_path,
+        ..Settings::default()
+    };
     if let Ok(raw) = fs::read_to_string(dir.join("settings.json")) {
         if let Ok(c) = serde_json::from_str::<Config>(&raw) {
             s.provider = c.provider;
@@ -147,18 +150,6 @@ pub fn save_settings(dir: &Path, v: &Value) -> Result<Value, String> {
         .as_str()
         .unwrap_or(crate::providers::GOOGLE_WEB);
     crate::providers::normalize(provider)?;
-    if v["api_key_changed"].as_bool().unwrap_or(false) {
-        let key = v["api_key"].as_str().unwrap_or("").trim();
-        let e = entry(provider)?;
-        if key.is_empty() {
-            let _ = e.delete_credential();
-            cache_credential(provider, None);
-        } else {
-            e.set_password(key)
-                .map_err(|e| format!("无法保存系统凭证：{e}"))?;
-            cache_credential(provider, Some(key));
-        }
-    }
     let web_provider = !crate::providers::requires_api_key(provider);
     let glossary_enabled = !web_provider && v["glossary_enabled"].as_bool().unwrap_or(false);
     let glossary_path = match v["glossary_path"].as_str().unwrap_or("").trim() {
@@ -186,11 +177,23 @@ pub fn save_settings(dir: &Path, v: &Value) -> Result<Value, String> {
         glossary_enabled,
         glossary_path: glossary_path.display().to_string(),
     };
-    fs::write(
-        dir.join("settings.json"),
-        serde_json::to_vec_pretty(&c).unwrap(),
-    )
-    .map_err(|e| e.to_string())?;
+
+    // Validate every non-sensitive field before changing the system credential.
+    // Otherwise a rejected settings form can still replace or delete a working key.
+    let config = serde_json::to_vec_pretty(&c).map_err(|e| e.to_string())?;
+    fs::write(dir.join("settings.json"), config).map_err(|e| e.to_string())?;
+    if v["api_key_changed"].as_bool().unwrap_or(false) {
+        let key = v["api_key"].as_str().unwrap_or("").trim();
+        let e = entry(provider)?;
+        if key.is_empty() {
+            let _ = e.delete_credential();
+            cache_credential(provider, None);
+        } else {
+            e.set_password(key)
+                .map_err(|e| format!("无法保存系统凭证：{e}"))?;
+            cache_credential(provider, Some(key));
+        }
+    }
     Ok(json!({"credential_backend":"系统凭证管理器","glossary_path":glossary_path}))
 }
 
@@ -366,6 +369,32 @@ mod tests {
         assert!(!settings.glossary_enabled);
         assert_eq!(settings.batch_size, "auto");
         assert_eq!(settings.concurrency, "auto");
+    }
+
+    #[test]
+    fn invalid_settings_do_not_replace_the_saved_configuration() {
+        let d = tempdir().unwrap();
+        let invalid_glossary = d.path().join("invalid.json");
+        fs::write(&invalid_glossary, "not json").unwrap();
+
+        let error = save_settings(
+            d.path(),
+            &json!({
+                "provider":crate::providers::DEEPL,
+                "base_url":"https://api-free.deepl.com",
+                "model":"deepl",
+                "style":"自然中文",
+                "batch_size":"auto",
+                "concurrency":"auto",
+                "glossary_enabled":true,
+                "glossary_path":invalid_glossary,
+                "api_key_changed":false
+            }),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("词表"));
+        assert!(!d.path().join("settings.json").exists());
     }
 
     #[test]
