@@ -424,7 +424,7 @@ fn save_translation_units(
     quests_dir: &Path,
     items: &[Item],
     results: &HashMap<String, String>,
-    failed: &HashSet<String>,
+    failure_statuses: &HashMap<String, &'static str>,
 ) -> Result<(), String> {
     let directory = quests_dir.join(".ftb-translater");
     fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
@@ -436,11 +436,10 @@ fn save_translation_units(
             path: &item.path,
             source: &item.source,
             target,
-            status: if failed.contains(&item.id) {
-                "fallback"
-            } else {
-                "translated"
-            },
+            status: failure_statuses
+                .get(&item.entry_id)
+                .copied()
+                .unwrap_or("translated"),
         };
         output.push_str(&serde_json::to_string(&record).map_err(|e| e.to_string())?);
         output.push('\n');
@@ -478,6 +477,7 @@ fn cmp_records(
     results: &HashMap<String, String>,
     warnings: &BTreeMap<String, Vec<String>>,
     failed_entries: &HashSet<String>,
+    failure_statuses: &HashMap<String, &'static str>,
 ) -> Result<Vec<cmp::Record>, String> {
     let entries = entries
         .iter()
@@ -502,7 +502,9 @@ fn cmp_records(
                 entry_id: item.entry_id.clone(),
                 path: item.path.clone(),
                 source: item.source.clone(),
-                status: if warnings.contains_key(&item.entry_id)
+                status: if let Some(status) = failure_statuses.get(&item.entry_id) {
+                    (*status).into()
+                } else if warnings.contains_key(&item.entry_id)
                     || failed_entries.contains(&item.entry_id)
                 {
                     "review".into()
@@ -515,6 +517,14 @@ fn cmp_records(
             })
         })
         .collect()
+}
+
+fn request_failure_status(error: &str) -> &'static str {
+    if error.contains("HTTP 429") || error.to_ascii_lowercase().contains("rate limit") {
+        "rate_limited"
+    } else {
+        "request_failed"
+    }
 }
 
 fn warnings(source: &str, target: &str) -> Vec<String> {
@@ -681,11 +691,36 @@ async fn request(
 }
 pub async fn translate(app: AppHandle, data_dir: PathBuf, payload: Value) -> Result<(), String> {
     let started_at = Instant::now();
-    let task_id = payload["_task_id"]
+    let mut task_id = payload["_task_id"]
         .as_str()
         .map(str::to_string)
         .unwrap_or_else(logging::task_id);
     let q = PathBuf::from(payload["quests_dir"].as_str().ok_or("缺少任务书目录")?);
+    let retry_document = payload["retry_cmp_path"]
+        .as_str()
+        .filter(|path| !path.trim().is_empty())
+        .map(|path| cmp::load(Path::new(path)))
+        .transpose()?;
+    if let Some(previous_task_id) = retry_document
+        .as_ref()
+        .map(|document| document.meta.task_id.trim())
+        .filter(|task_id| !task_id.is_empty())
+    {
+        task_id = previous_task_id.to_string();
+    }
+    let retry_locations = retry_document
+        .as_ref()
+        .map_or_else(HashSet::new, |document| {
+            document
+                .records
+                .iter()
+                .filter(|record| record.status == "rate_limited")
+                .map(|record| (record.entry_id.clone(), record.path.clone()))
+                .collect()
+        });
+    if payload["retry_cmp_path"].is_string() && retry_locations.is_empty() {
+        return Err("CMP 中没有可重试的限流条目".into());
+    }
     let m = mode(&q)?;
     let mut settings = crate_root::storage::load_settings(&data_dir);
     for k in [
@@ -819,6 +854,10 @@ pub async fn translate(app: AppHandle, data_dir: PathBuf, payload: Value) -> Res
             );
         }
     }
+    if !retry_locations.is_empty() {
+        pending
+            .retain(|item| retry_locations.contains(&(item.entry_id.clone(), item.path.clone())));
+    }
     let bs = parse_auto(&settings.batch_size, 25)?;
     let mut concurrency = parse_auto(&settings.concurrency, 6)?.min(12);
     if let Some(limit) = providers::concurrency_limit(&settings.provider) {
@@ -898,6 +937,7 @@ pub async fn translate(app: AppHandle, data_dir: PathBuf, payload: Value) -> Res
     let mut unit_results = HashMap::new();
     let mut failed_units = HashSet::new();
     let mut failed_entries = HashSet::new();
+    let mut failure_statuses = HashMap::new();
     while let Some((batch, r)) = stream.next().await {
         match r {
             Ok(map) => {
@@ -905,7 +945,22 @@ pub async fn translate(app: AppHandle, data_dir: PathBuf, payload: Value) -> Res
                     let raw = map.get(&x.id).cloned().unwrap_or(x.protected);
                     match restore(&raw, &x.tokens) {
                         Ok(restored) => {
+                            let _ = app2.emit(
+                                "translation-event",
+                                json!({
+                                    "type":"translation_preview",
+                                    "task_id":task_id,
+                                    "entry_id":x.entry_id,
+                                    "source":x.source,
+                                    "target":restored,
+                                    "status":"translated",
+                                }),
+                            );
                             unit_results.insert(x.id, restored);
+                            let _ = app2.emit(
+                                "translation-event",
+                                json!({"type":"progress","task_id":task_id,"stage":"translating","done":unit_results.len(),"total":total}),
+                            );
                         }
                         Err(error) => {
                             logging::warn(
@@ -915,13 +970,19 @@ pub async fn translate(app: AppHandle, data_dir: PathBuf, payload: Value) -> Res
                                 json!({"task_id":task_id,"entry_id":x.entry_id,"path":x.path,"error":error}),
                             );
                             failed_entries.insert(x.entry_id.clone());
+                            failure_statuses.insert(x.entry_id.clone(), "format_guard");
                             failed_units.insert(x.id.clone());
                             unit_results.insert(x.id, x.source);
+                            let _ = app2.emit(
+                                "translation-event",
+                                json!({"type":"progress","task_id":task_id,"stage":"format_guard","done":unit_results.len(),"total":total}),
+                            );
                         }
                     }
                 }
             }
             Err(e) => {
+                let status = request_failure_status(&e);
                 for x in batch {
                     logging::warn(
                         "translation",
@@ -930,18 +991,18 @@ pub async fn translate(app: AppHandle, data_dir: PathBuf, payload: Value) -> Res
                         json!({"task_id":task_id,"entry_id":x.entry_id,"path":x.path,"error":&e}),
                     );
                     failed_entries.insert(x.entry_id.clone());
+                    failure_statuses.insert(x.entry_id.clone(), status);
                     failed_units.insert(x.id.clone());
                     unit_results.insert(x.id, x.source);
+                    let _ = app2.emit(
+                        "translation-event",
+                        json!({"type":"progress","task_id":task_id,"stage":status,"done":unit_results.len(),"total":total}),
+                    );
                 }
             }
         }
-        let done = unit_results.len();
-        let _ = app2.emit(
-            "translation-event",
-            json!({"type":"progress","task_id":task_id,"stage":"translating","done":done,"total":total}),
-        );
     }
-    save_translation_units(&q, &pending, &unit_results, &failed_units)?;
+    save_translation_units(&q, &pending, &unit_results, &failure_statuses)?;
     logging::debug(
         "translation",
         "provider_phase_completed",
@@ -989,11 +1050,44 @@ pub async fn translate(app: AppHandle, data_dir: PathBuf, payload: Value) -> Res
         }
     }
     save_cache(&q, &cache)?;
-    let records = cmp_records(m, &entries, &items, &results, &warns, &failed_entries)?;
-    let cmp_path = q.join(".ftb-translater/reviews").join(format!(
-        "translation-{}.cmp",
-        Local::now().format("%Y%m%d-%H%M%S")
-    ));
+    let mut records = cmp_records(
+        m,
+        &entries,
+        &items,
+        &results,
+        &warns,
+        &failed_entries,
+        &failure_statuses,
+    )?;
+    if let Some(previous) = &retry_document {
+        let generated = records
+            .into_iter()
+            .map(|record| ((record.entry_id.clone(), record.path.clone()), record))
+            .collect::<HashMap<_, _>>();
+        records = previous
+            .records
+            .iter()
+            .map(|record| {
+                if retry_locations.contains(&(record.entry_id.clone(), record.path.clone())) {
+                    generated
+                        .get(&(record.entry_id.clone(), record.path.clone()))
+                        .cloned()
+                        .unwrap_or_else(|| record.clone())
+                } else {
+                    record.clone()
+                }
+            })
+            .collect();
+    }
+    let cmp_path = payload["retry_cmp_path"]
+        .as_str()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            q.join(".ftb-translater/reviews").join(format!(
+                "translation-{}.cmp",
+                Local::now().format("%Y%m%d-%H%M%S")
+            ))
+        });
     cmp::write(
         &cmp_path,
         &cmp::Document {
@@ -1198,7 +1292,7 @@ fn apply_cmp_inner(
                 problems.join("；")
             ));
         }
-        if record.status == "review" && record.target == record.source {
+        if record.status != "translated" && record.target == record.source {
             pending_reviews.insert(record.entry_id.clone());
         }
         unit_targets.insert(item.id.clone(), record.target.clone());
@@ -1393,6 +1487,55 @@ pub fn export_cmp(payload: &Value) -> Result<Value, String> {
     Ok(json!({"path":target}))
 }
 
+pub fn review_cmp(payload: &Value) -> Result<Value, String> {
+    let path = Path::new(payload["cmp_path"].as_str().ok_or("缺少 CMP 文件路径")?);
+    let document = cmp::load(path)?;
+    Ok(json!({
+        "entries": document.records.iter().enumerate().map(|(index, record)| json!({
+            "index": index,
+            "entry_id": record.entry_id,
+            "path": record.path,
+            "file": record.file,
+            "source": record.source,
+            "target": record.target,
+            "status": record.status,
+        })).collect::<Vec<_>>(),
+    }))
+}
+
+pub fn save_cmp_edits(payload: &Value) -> Result<Value, String> {
+    let path = Path::new(payload["cmp_path"].as_str().ok_or("缺少 CMP 文件路径")?);
+    let edits = payload["entries"]
+        .as_array()
+        .ok_or("缺少 CMP 校对表格内容")?;
+    let mut document = cmp::load(path)?;
+    if edits.len() != document.records.len() {
+        return Err("CMP 校对表格条目数已变化，请重新打开校对表格".into());
+    }
+    for (index, (record, edit)) in document.records.iter_mut().zip(edits).enumerate() {
+        if edit["index"].as_u64() != Some(index as u64)
+            || edit["entry_id"].as_str() != Some(record.entry_id.as_str())
+            || edit["path"].as_str() != Some(record.path.as_str())
+            || edit["source"].as_str() != Some(record.source.as_str())
+        {
+            return Err("CMP 校对表格内容已过期或不属于当前文件，请重新打开".into());
+        }
+        let target = edit["target"].as_str().ok_or("校对译文必须是文本")?;
+        if target.trim().is_empty() {
+            return Err(format!("第 {} 条译文不能为空", index + 1));
+        }
+        record.target = target.to_string();
+    }
+    cmp::write(path, &document)?;
+    logging::info(
+        "translation",
+        "cmp_edits_saved",
+        "CMP 校对表格修改已保存",
+        json!({"task_id":document.meta.task_id,"cmp_path":path,"entries":edits.len()}),
+    );
+    Ok(json!({"saved":true,"entries":edits.len()}))
+}
+
 pub fn open_cmp(payload: &Value) -> Result<Value, String> {
     let path = PathBuf::from(payload["cmp_path"].as_str().ok_or("缺少 CMP 文件路径")?);
     if path.extension().is_none_or(|extension| extension != "cmp") || !path.is_file() {
@@ -1420,37 +1563,6 @@ pub fn open_cmp(payload: &Value) -> Result<Value, String> {
         json!({"task_id":task_id,"cmp_path":path}),
     );
     Ok(json!({"opened":true}))
-}
-
-pub fn save_review(v: &Value) -> Result<Value, String> {
-    let target = PathBuf::from(v["target_file"].as_str().unwrap_or(""));
-    let key = v["key"].as_str().unwrap_or("");
-    let text = v["text"].as_str().unwrap_or("");
-    if text.trim().is_empty() {
-        return Err("译文不能为空".into());
-    }
-    if target.is_file() {
-        let mut map = snbt::load(&target)?;
-        let entry = map
-            .iter_mut()
-            .find(|x| x.0 == key)
-            .ok_or("目标文件中找不到此条目")?;
-        entry.1 = match &entry.1 {
-            LangValue::Text(_) => LangValue::Text(text.into()),
-            LangValue::Lines(_) => LangValue::Lines(text.split('\n').map(str::to_string).collect()),
-        };
-        snbt::write(&target, &map)?;
-    } else {
-        let p = key.splitn(3, ':').collect::<Vec<_>>();
-        if p.len() != 3 {
-            return Err("章节条目标识无效".into());
-        }
-        chapters::replace(
-            &target.join(p[0]),
-            &[(p[1].parse().map_err(|_| "章节序号无效")?, text.into())],
-        )?;
-    }
-    Ok(json!({"saved":true}))
 }
 
 #[cfg(test)]
@@ -1665,30 +1777,6 @@ mod tests {
         )
         .is_err());
         assert!(!quests.join("lang/zh_cn.snbt").exists());
-    }
-
-    #[test]
-    fn review_preserves_language_line_arrays() {
-        let d = tempdir().unwrap();
-        let target = d.path().join("zh_cn.snbt");
-        fs::write(
-            &target,
-            r#"{ "description": ["First line", "Second line"] }"#,
-        )
-        .unwrap();
-
-        save_review(&json!({
-            "target_file": target,
-            "key": "description",
-            "text": "第一行\n第二行"
-        }))
-        .unwrap();
-
-        let map = snbt::load(&target).unwrap();
-        assert_eq!(
-            map[0].1,
-            LangValue::Lines(vec!["第一行".into(), "第二行".into()])
-        );
     }
 
     #[test]

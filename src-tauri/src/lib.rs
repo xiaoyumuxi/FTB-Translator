@@ -80,9 +80,10 @@ fn bridge(app: tauri::AppHandle, command: String, payload: Option<Value>) -> Res
             Ok(json!({"path":path}))
         }
         "cmp-apply" => core::apply_cmp(&dir, &v),
+        "cmp-review" => core::review_cmp(&v),
+        "cmp-save-edits" => core::save_cmp_edits(&v),
         "cmp-export" => core::export_cmp(&v),
         "cmp-open" => core::open_cmp(&v),
-        "save-review" => core::save_review(&v),
         _ => Err(format!("未知命令：{command}")),
     };
     if let Err(error) = &result {

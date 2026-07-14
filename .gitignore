@@ -7,3 +7,4 @@ history.sqlite3
 dist/
 node_modules/
 src-tauri/target/
+modpacks/

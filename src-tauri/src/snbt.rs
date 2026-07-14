@@ -174,12 +174,6 @@ pub fn dump(values: &LangMap) -> String {
     out.push_str("}\n");
     out
 }
-pub fn write(path: &Path, values: &LangMap) -> Result<(), String> {
-    let text = dump(values);
-    parse(&text)?;
-    fs::write(path, text).map_err(|e| format!("无法写入 {}：{e}", path.display()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

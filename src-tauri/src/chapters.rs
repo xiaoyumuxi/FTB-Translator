@@ -197,12 +197,6 @@ pub fn render_replacements(
     validate_structure(&text)?;
     Ok((text, matches.len()))
 }
-pub fn replace(path: &Path, replacements: &[(usize, String)]) -> Result<usize, String> {
-    let (text, count) = render_replacements(path, replacements)?;
-    fs::write(path, text).map_err(|e| e.to_string())?;
-    Ok(count)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,8 +212,9 @@ mod tests {
         .unwrap();
         let s = extract(&p).unwrap();
         assert_eq!(s.len(), 2);
-        assert_eq!(replace(&p, &[(0, "你好".into())]).unwrap(), 1);
-        assert!(fs::read_to_string(p).unwrap().contains("你好"));
+        let (rendered, count) = render_replacements(&p, &[(0, "你好".into())]).unwrap();
+        assert_eq!(count, 1);
+        assert!(rendered.contains("你好"));
     }
 
     #[test]
