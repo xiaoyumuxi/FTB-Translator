@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs,
     path::{Path, PathBuf},
+    sync::OnceLock,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -56,9 +57,17 @@ fn quote(s: &str, q: char) -> String {
     )
 }
 pub fn extract(path: &Path) -> Result<Vec<Segment>, String> {
+    static FIELD: OnceLock<Regex> = OnceLock::new();
+    static STRINGS: OnceLock<Regex> = OnceLock::new();
     let text = fs::read_to_string(path).map_err(|e| e.to_string())?;
-    let re=Regex::new(r#"(?s)(?:\b(title|subtitle|description|text|name)|["'](title|subtitle|description|text|name)["'])\s*:\s*(\[[^\]]*]|"(?:\\.|[^"])*"|'(?:\\.|[^'])*')"#).unwrap();
-    let strings = Regex::new(r#""((?:\\.|[^"])*)"|'((?:\\.|[^'])*)'"#).unwrap();
+    let re = FIELD.get_or_init(|| {
+        Regex::new(r#"(?s)(?:\b(title|subtitle|description|text|name)|["'](title|subtitle|description|text|name)["'])\s*:\s*(\[[^\]]*]|"(?:\\.|[^"])*"|'(?:\\.|[^'])*')"#)
+            .expect("chapter-field regex must be valid")
+    });
+    let strings = STRINGS.get_or_init(|| {
+        Regex::new(r#""((?:\\.|[^"])*)"|'((?:\\.|[^'])*)'"#)
+            .expect("chapter-string regex must be valid")
+    });
     let mut out = vec![];
     for cap in re.captures_iter(&text) {
         let match_start = cap.get(0).unwrap().start();

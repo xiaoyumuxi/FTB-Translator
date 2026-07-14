@@ -15,6 +15,8 @@ use std::{
     collections::{BTreeMap, HashMap},
     fs,
     path::{Path, PathBuf},
+    sync::OnceLock,
+    time::Duration,
 };
 use tauri::{AppHandle, Emitter};
 use walkdir::WalkDir;
@@ -169,8 +171,25 @@ fn parse_auto(s: &str, default: usize) -> Result<usize, String> {
             .ok_or("批大小与并发数必须是 auto 或正整数".into())
     }
 }
-fn patterns() -> Vec<Regex> {
-    [r"(?i)[&§][0-9a-fk-orz]",r"%(?:\d+\$)?[-+# 0,(]*\d*(?:\.\d+)?[bcdeEufFgGosxX]",r"<[^<>\n]+>",r"\{[@A-Za-z][^{}\n]*\}",r"(?i)\b(?:[a-z0-9_.-]+:[a-z0-9_.-]+(?:/[a-z0-9_.-]+)+|(?:assets|config|data|kubejs|models|recipes|textures|ftbquests|chapters|lang|scripts)/[a-z0-9_./-]+|[a-z0-9_.-]+(?:/[a-z0-9_.-]+)+\.[a-z0-9]+)\b",r#"\\[nrt\"'\\]"#,r#"https?://[^\s\"')\]]+"#,r"#[0-9a-fA-F]{6}\b"].iter().map(|x|Regex::new(x).unwrap()).collect()
+fn patterns() -> &'static [Regex] {
+    static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
+    PATTERNS
+        .get_or_init(|| {
+            [
+                r"(?i)[&§][0-9a-fk-orz]",
+                r"%(?:\d+\$)?[-+# 0,(]*\d*(?:\.\d+)?[bcdeEufFgGosxX]",
+                r"<[^<>\n]+>",
+                r"\{[@A-Za-z][^{}\n]*\}",
+                r"(?i)\b(?:[a-z0-9_.-]+:[a-z0-9_.-]+(?:/[a-z0-9_.-]+)+|(?:assets|config|data|kubejs|models|recipes|textures|ftbquests|chapters|lang|scripts)/[a-z0-9_./-]+|[a-z0-9_.-]+(?:/[a-z0-9_.-]+)+\.[a-z0-9]+)\b",
+                r#"\\[nrt\"'\\]"#,
+                r#"https?://[^\s\"')\]]+"#,
+                r"#[0-9a-fA-F]{6}\b",
+            ]
+            .iter()
+            .map(|pattern| Regex::new(pattern).expect("format-protection regex must be valid"))
+            .collect()
+        })
+        .as_slice()
 }
 fn protect(text: &str) -> (String, Vec<(String, String)>) {
     let mut found = vec![];
@@ -480,7 +499,11 @@ pub async fn translate(app: AppHandle, data_dir: PathBuf, payload: Value) -> Res
     }
     let batches = pending.chunks(bs).map(|x| x.to_vec()).collect::<Vec<_>>();
     let total = pending.len();
-    let client = Client::new();
+    let client = Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(90))
+        .build()
+        .map_err(|e| format!("无法初始化翻译网络客户端：{e}"))?;
     let app2 = app.clone();
     let settings2 = settings.clone();
     let stream = stream::iter(batches.into_iter().map(|batch| {

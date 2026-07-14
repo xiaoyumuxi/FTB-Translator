@@ -107,7 +107,9 @@ async fn request_openai(
             }
             Err(error) => last = error.to_string(),
         }
-        tokio::time::sleep(Duration::from_millis(800 * (attempt + 1))).await;
+        if attempt < 2 {
+            tokio::time::sleep(Duration::from_millis(800 * (attempt + 1))).await;
+        }
     }
     Err(last)
 }
@@ -375,7 +377,9 @@ where
             }
             Err(error) => last = error.to_string(),
         }
-        tokio::time::sleep(Duration::from_millis(1000 * (attempt + 1))).await;
+        if attempt < 2 {
+            tokio::time::sleep(Duration::from_millis(1000 * (attempt + 1))).await;
+        }
     }
     Err(last)
 }
