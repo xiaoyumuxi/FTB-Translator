@@ -239,4 +239,12 @@ mod tests {
         let value = serde_json::to_value(&document().meta).unwrap();
         assert_eq!(value["version"], serde_json::Value::from(1));
     }
+
+    #[test]
+    fn older_v1_metadata_without_task_id_remains_readable() {
+        let mut value = serde_json::to_value(&document().meta).unwrap();
+        value.as_object_mut().unwrap().remove("task_id");
+        let parsed: Meta = serde_json::from_value(value).unwrap();
+        assert!(parsed.task_id.is_empty());
+    }
 }

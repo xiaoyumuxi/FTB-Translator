@@ -18,7 +18,7 @@ CMP 是 FTB Translater 面向玩家和校对者的翻译工程文件。它把“
 ```text
 # FTB Translater CMP v1
 # 只修改箭头右侧的中文；保留 @ 行、英文原文、引号与 JSON 转义。
-# meta {"version":1,"quests_dir":"/pack/config/ftbquests/quests","mode":"chapters","source_fingerprint":"...","provider":"google_web","base_url":"https://translate.googleapis.com","model":"google-web","style":"自然玩家向简体中文汉化","glossary_enabled":false,"glossary_fingerprint":"","total_entries":2,"cache_hits":0}
+# meta {"version":1,"task_id":"20260714T120000.000Z-0001","quests_dir":"/pack/config/ftbquests/quests","mode":"chapters","source_fingerprint":"...","provider":"google_web","base_url":"https://translate.googleapis.com","model":"google-web","style":"自然玩家向简体中文汉化","glossary_enabled":false,"glossary_fingerprint":"","total_entries":2,"cache_hits":0}
 
 ## file "chapters/example.snbt"
 
@@ -55,6 +55,7 @@ CMP 是 FTB Translater 面向玩家和校对者的翻译工程文件。它把“
 | 字段 | 含义 |
 |---|---|
 | `version` | CMP 格式版本；当前固定为 `1` |
+| `task_id` | 串联 API 请求、CMP 操作、写回与历史日志；早期 v1 文件缺少时应用会为本次操作生成新编号 |
 | `quests_dir` | 生成 CMP 时的任务书目录 |
 | `mode` | `lang` 或 `chapters` |
 | `source_fingerprint` | 按条目 ID 和完整英文原文计算的 SHA-256 指纹 |

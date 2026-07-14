@@ -938,7 +938,7 @@ pub async fn translate(app: AppHandle, data_dir: PathBuf, payload: Value) -> Res
         let done = unit_results.len();
         let _ = app2.emit(
             "translation-event",
-            json!({"type":"progress","stage":"translating","done":done,"total":total}),
+            json!({"type":"progress","task_id":task_id,"stage":"translating","done":done,"total":total}),
         );
     }
     save_translation_units(&q, &pending, &unit_results, &failed_units)?;
@@ -1070,13 +1070,27 @@ pub fn apply_cmp(data_dir: &Path, payload: &Value) -> Result<Value, String> {
         "CMP 校验与写回流程已开始",
         json!({"task_id":task_id,"cmp_path":cmp_path}),
     );
-    let result = apply_cmp_inner(data_dir, payload, cmp_path.clone(), document, &task_id);
+    logging::info(
+        "translation",
+        "cmp_validation_started",
+        "开始重新扫描源文件并校验 CMP",
+        json!({"task_id":task_id,"cmp_path":cmp_path}),
+    );
+    let phase = std::cell::Cell::new("validation");
+    let result = apply_cmp_inner(
+        data_dir,
+        payload,
+        cmp_path.clone(),
+        document,
+        &task_id,
+        &phase,
+    );
     if let Err(error) = &result {
         logging::warn(
             "translation",
             "cmp_apply_failed",
             "CMP 校验或写回流程失败",
-            json!({"task_id":task_id,"cmp_path":cmp_path,"error":error}),
+            json!({"task_id":task_id,"cmp_path":cmp_path,"phase":phase.get(),"error":error}),
         );
     }
     result
@@ -1088,6 +1102,7 @@ fn apply_cmp_inner(
     cmp_path: PathBuf,
     document: cmp::Document,
     task_id: &str,
+    phase: &std::cell::Cell<&str>,
 ) -> Result<Value, String> {
     let selected = Path::new(payload["quests_dir"].as_str().ok_or("缺少任务书目录")?);
     let q = resolve(selected)?;
@@ -1279,6 +1294,7 @@ fn apply_cmp_inner(
             "output_files":pending_outputs.len()
         }),
     );
+    phase.set("backup");
     logging::info(
         "translation",
         "backup_started",
@@ -1292,6 +1308,7 @@ fn apply_cmp_inner(
         "当前任务书备份完成",
         json!({"task_id":task_id,"backup_dir":backup}),
     );
+    phase.set("commit");
     logging::info(
         "translation",
         "output_commit_started",
@@ -1305,6 +1322,7 @@ fn apply_cmp_inner(
         "全部翻译输出已提交",
         json!({"task_id":task_id,"output_files":pending_outputs.len()}),
     );
+    phase.set("history");
     let outputs = pending_outputs
         .into_iter()
         .map(|output| (output.archive_name, output.content, json!({})))

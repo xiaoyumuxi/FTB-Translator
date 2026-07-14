@@ -110,7 +110,10 @@ fn start_translation(app: tauri::AppHandle, mut payload: Value) -> Result<(), St
                 "翻译任务失败",
                 json!({"task_id":task_id,"error":e}),
             );
-            let _ = task_app.emit("translation-event", json!({"type":"error","message":e}));
+            let _ = task_app.emit(
+                "translation-event",
+                json!({"type":"error","task_id":task_id,"message":e}),
+            );
         }
     });
     Ok(())
@@ -125,12 +128,24 @@ pub fn run() {
             let dir = data_dir(app.handle()).map_err(std::io::Error::other)?;
             let settings = storage::load_settings(&dir);
             match logging::init(&settings.log_level) {
-                Ok(_) => logging::info(
-                    "app",
-                    "application_started",
-                    "应用程序已启动",
-                    json!({"version":env!("CARGO_PKG_VERSION")}),
-                ),
+                Ok(_) => {
+                    logging::info(
+                        "app",
+                        "application_started",
+                        "应用程序已启动",
+                        json!({"version":env!("CARGO_PKG_VERSION")}),
+                    );
+                    logging::debug(
+                        "settings",
+                        "startup_settings_loaded",
+                        "启动设置已加载",
+                        json!({
+                            "provider":settings.provider,
+                            "log_level":settings.log_level,
+                            "glossary_enabled":settings.glossary_enabled
+                        }),
+                    );
+                }
                 Err(error) => eprintln!("{error}"),
             }
             if let Some(w) = app.get_webview_window("main") {

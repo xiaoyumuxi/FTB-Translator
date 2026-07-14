@@ -289,10 +289,7 @@ fn clean_value(value: Value, depth: usize) -> Value {
             values
                 .into_iter()
                 .map(|(key, value)| {
-                    let hidden = matches!(
-                        key.to_ascii_lowercase().as_str(),
-                        "api_key" | "authorization" | "password" | "token" | "secret"
-                    );
+                    let hidden = is_sensitive_key(&key);
                     let value = if hidden {
                         Value::String("[REDACTED]".into())
                     } else if key.eq_ignore_ascii_case("error") {
@@ -319,7 +316,28 @@ fn clean_value(value: Value, depth: usize) -> Value {
     }
 }
 
+fn is_sensitive_key(key: &str) -> bool {
+    let normalized = key
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    matches!(
+        normalized.as_str(),
+        "apikey"
+            | "authorization"
+            | "password"
+            | "passwd"
+            | "token"
+            | "accesstoken"
+            | "refreshtoken"
+            | "secret"
+            | "clientsecret"
+    )
+}
+
 fn clean_error(value: &str) -> String {
+    let value = value.trim_start();
     if value.starts_with("HTTP ") {
         return value.split(':').next().unwrap_or("HTTP error").to_string();
     }
@@ -406,9 +424,27 @@ mod tests {
 
     #[test]
     fn removes_sensitive_structured_fields() {
-        let value = clean_value(json!({"api_key":"abc", "nested":{"token":"xyz"}}), 0);
+        let value = clean_value(
+            json!({
+                "api_key":"abc",
+                "nested":{"accessToken":"xyz","client-secret":"hidden"},
+                "entry_key":"quest.title"
+            }),
+            0,
+        );
         assert_eq!(value["api_key"], "[REDACTED]");
-        assert_eq!(value["nested"]["token"], "[REDACTED]");
+        assert_eq!(value["nested"]["accessToken"], "[REDACTED]");
+        assert_eq!(value["nested"]["client-secret"], "[REDACTED]");
+        assert_eq!(value["entry_key"], "quest.title");
+    }
+
+    #[test]
+    fn removes_http_response_bodies_from_errors() {
+        let value = clean_value(
+            json!({"error":"  HTTP 429 Too Many Requests: echoed source text"}),
+            0,
+        );
+        assert_eq!(value["error"], "HTTP 429 Too Many Requests");
     }
 
     #[test]
