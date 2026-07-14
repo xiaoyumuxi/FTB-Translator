@@ -76,6 +76,8 @@ npm run tauri -- build
 
 API 阶段完成后，程序在任务书目录的 `.ftb-translater/reviews/` 中生成玩家可见、可导出的 `.cmp` 校对文件。每个单元包含不可修改的 `@` 回填位置，以及一行 JSON 转义后的 `"英文" -> "中文"`。JSON 字符串转义让换行、引号和文本中原有的箭头不会破坏格式；人工校对只修改箭头右侧。应用 CMP 时会再次核对原任务书内容和每个回填位置，文件缺条目、重复位置、英文被修改或格式标签变化都会拒绝写入。
 
+校对表格可以按状态筛选。接口限流会单独标记为 `rate_limited`，可用“重试限流项”仅重新请求这一批；重试前会再次校验 CMP 与当前任务书的一致性，成功后更新同一个 CMP，其他译文和人工编辑保持不变。
+
 ```text
 ## file "chapters/example.snbt"
 @ {"file":"chapters/example.snbt","entry_id":"example.snbt:0:description","path":"/extra/0/text","status":"translated"}

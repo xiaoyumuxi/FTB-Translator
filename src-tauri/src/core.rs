@@ -459,6 +459,61 @@ fn source_fingerprint(entries: &[Entry]) -> String {
     hex::encode(hash.finalize())
 }
 
+fn validate_cmp_identity(
+    document: &cmp::Document,
+    quests_dir: &Path,
+    mode: &str,
+) -> Result<(), String> {
+    let current = quests_dir.canonicalize().map_err(|e| e.to_string())?;
+    let recorded = PathBuf::from(&document.meta.quests_dir)
+        .canonicalize()
+        .map_err(|e| format!("CMP 中的任务书目录不可用：{e}"))?;
+    if recorded != current {
+        return Err("CMP 不属于当前扫描的任务书目录".into());
+    }
+    if document.meta.mode != mode {
+        return Err("CMP 的任务书模式与当前目录不一致".into());
+    }
+    Ok(())
+}
+
+fn validate_cmp_source(
+    document: &cmp::Document,
+    quests_dir: &Path,
+    mode: &str,
+    entries: &[Entry],
+    items: &[Item],
+) -> Result<(), String> {
+    validate_cmp_identity(document, quests_dir, mode)?;
+    if document.meta.total_entries != entries.len()
+        || document.meta.source_fingerprint != source_fingerprint(entries)
+    {
+        return Err("任务书内容在 CMP 生成后发生了变化，请重新扫描并翻译".into());
+    }
+    if document.records.len() != items.len() {
+        return Err("CMP 翻译条目数量与当前任务书不一致".into());
+    }
+    let expected = items
+        .iter()
+        .map(|item| ((item.entry_id.as_str(), item.path.as_str()), item))
+        .collect::<HashMap<_, _>>();
+    for record in &document.records {
+        let item = expected
+            .get(&(record.entry_id.as_str(), record.path.as_str()))
+            .ok_or_else(|| format!("CMP 包含未知回填位置：{} {}", record.entry_id, record.path))?;
+        if record.file != entry_source_file(mode, &record.entry_id) {
+            return Err(format!("CMP 文件归属被修改：{}", record.entry_id));
+        }
+        if record.source != item.source {
+            return Err(format!(
+                "CMP 英文原文被修改：{} {}。只允许修改箭头右侧中文",
+                record.entry_id, record.path
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn entry_source_file(mode: &str, entry_id: &str) -> String {
     if mode == "lang" {
         "lang/en_us.snbt".into()
@@ -602,9 +657,24 @@ fn save_cache(q: &Path, c: &HashMap<String, String>) -> Result<(), String> {
     fs::write(p, serde_json::to_vec_pretty(c).unwrap()).map_err(|e| e.to_string())
 }
 fn backup(q: &Path, m: &str) -> Result<PathBuf, String> {
-    let root = q
-        .join(".ftb-translater/backups")
-        .join(Local::now().format("%Y%m%d-%H%M%S").to_string());
+    let parent = q.join(".ftb-translater/backups");
+    fs::create_dir_all(&parent).map_err(|e| e.to_string())?;
+    let timestamp = Local::now().format("%Y%m%d-%H%M%S").to_string();
+    let root = (0..1000)
+        .find_map(|attempt| {
+            let name = if attempt == 0 {
+                timestamp.clone()
+            } else {
+                format!("{timestamp}-{attempt:03}")
+            };
+            let candidate = parent.join(name);
+            match fs::create_dir(&candidate) {
+                Ok(()) => Some(Ok(candidate)),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => None,
+                Err(error) => Some(Err(error.to_string())),
+            }
+        })
+        .ok_or("无法创建唯一备份目录")??;
     let name = if m == "lang" { "lang" } else { "chapters" };
     for e in WalkDir::new(q.join(name)) {
         let e = e.map_err(|e| e.to_string())?;
@@ -691,7 +761,7 @@ async fn request(
 }
 pub async fn translate(app: AppHandle, data_dir: PathBuf, payload: Value) -> Result<(), String> {
     let started_at = Instant::now();
-    let mut task_id = payload["_task_id"]
+    let task_id = payload["_task_id"]
         .as_str()
         .map(str::to_string)
         .unwrap_or_else(logging::task_id);
@@ -701,13 +771,6 @@ pub async fn translate(app: AppHandle, data_dir: PathBuf, payload: Value) -> Res
         .filter(|path| !path.trim().is_empty())
         .map(|path| cmp::load(Path::new(path)))
         .transpose()?;
-    if let Some(previous_task_id) = retry_document
-        .as_ref()
-        .map(|document| document.meta.task_id.trim())
-        .filter(|task_id| !task_id.is_empty())
-    {
-        task_id = previous_task_id.to_string();
-    }
     let retry_locations = retry_document
         .as_ref()
         .map_or_else(HashSet::new, |document| {
@@ -722,6 +785,9 @@ pub async fn translate(app: AppHandle, data_dir: PathBuf, payload: Value) -> Res
         return Err("CMP 中没有可重试的限流条目".into());
     }
     let m = mode(&q)?;
+    if let Some(document) = &retry_document {
+        validate_cmp_identity(document, &q, m)?;
+    }
     let mut settings = crate_root::storage::load_settings(&data_dir);
     for k in [
         "api_key",
@@ -813,6 +879,9 @@ pub async fn translate(app: AppHandle, data_dir: PathBuf, payload: Value) -> Res
                 entry_index += 1;
             }
         }
+    }
+    if let Some(document) = &retry_document {
+        validate_cmp_source(document, &q, m, &entries, &items)?;
     }
     logging::info(
         "translation",
@@ -1200,17 +1269,8 @@ fn apply_cmp_inner(
 ) -> Result<Value, String> {
     let selected = Path::new(payload["quests_dir"].as_str().ok_or("缺少任务书目录")?);
     let q = resolve(selected)?;
-    let q_canonical = q.canonicalize().map_err(|e| e.to_string())?;
-    let cmp_quests = PathBuf::from(&document.meta.quests_dir)
-        .canonicalize()
-        .map_err(|e| format!("CMP 中的任务书目录不可用：{e}"))?;
-    if cmp_quests != q_canonical {
-        return Err("CMP 不属于当前扫描的任务书目录".into());
-    }
     let m = mode(&q)?;
-    if document.meta.mode != m {
-        return Err("CMP 的任务书模式与当前目录不一致".into());
-    }
+    validate_cmp_identity(&document, &q, m)?;
 
     let mut entries = Vec::new();
     let mut items = Vec::new();
@@ -1416,7 +1476,7 @@ fn apply_cmp_inner(
         "全部翻译输出已提交",
         json!({"task_id":task_id,"output_files":pending_outputs.len()}),
     );
-    phase.set("history");
+    phase.set("metadata");
     let outputs = pending_outputs
         .into_iter()
         .map(|output| (output.archive_name, output.content, json!({})))
@@ -1437,7 +1497,14 @@ fn apply_cmp_inner(
             cache.insert(cache_key(&entry.source, &settings), target.clone());
         }
     }
-    save_cache(&q, &cache)?;
+    if let Err(error) = save_cache(&q, &cache) {
+        logging::warn(
+            "translation",
+            "cache_update_failed_after_commit",
+            "任务书已写入，但翻译缓存更新失败",
+            json!({"task_id":task_id,"quests_dir":q,"error":error}),
+        );
+    }
     let report = Report {
         source_file: source_file.display().to_string(),
         target_file: target_file.display().to_string(),
@@ -1450,12 +1517,32 @@ fn apply_cmp_inner(
         failed_translations: details,
     };
     let report_value = serde_json::to_value(&report).map_err(|e| e.to_string())?;
-    let run_id = History::new(data_dir)?.insert(&q, m, &settings, &report_value, &outputs)?;
-    fs::write(
-        q.join(".ftb-translater/report-latest.json"),
-        serde_json::to_vec_pretty(&report_value).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())?;
+    let run_id = match History::new(data_dir)
+        .and_then(|history| history.insert(&q, m, &settings, &report_value, &outputs))
+    {
+        Ok(run_id) => run_id,
+        Err(error) => {
+            logging::warn(
+                "translation",
+                "history_write_failed_after_commit",
+                "任务书已写入，但翻译历史保存失败",
+                json!({"task_id":task_id,"quests_dir":q,"error":error}),
+            );
+            0
+        }
+    };
+    let report_path = q.join(".ftb-translater/report-latest.json");
+    let report_result = serde_json::to_vec_pretty(&report_value)
+        .map_err(|error| error.to_string())
+        .and_then(|bytes| fs::write(&report_path, bytes).map_err(|error| error.to_string()));
+    if let Err(error) = report_result {
+        logging::warn(
+            "translation",
+            "report_write_failed_after_commit",
+            "任务书已写入，但最新报告保存失败",
+            json!({"task_id":task_id,"path":report_path,"error":error}),
+        );
+    }
     logging::info(
         "translation",
         "cmp_applied",
@@ -1743,6 +1830,46 @@ mod tests {
     }
 
     #[test]
+    fn retry_validation_rejects_another_pack_or_modified_source() {
+        let directory = tempdir().unwrap();
+        let quests = directory.path().join("pack-a/quests");
+        let other = directory.path().join("pack-b/quests");
+        fs::create_dir_all(quests.join("lang")).unwrap();
+        fs::create_dir_all(other.join("lang")).unwrap();
+        let cmp_path = directory.path().join("review.cmp");
+        write_test_cmp(&cmp_path, &quests, "Hello", "Hello", "Hello");
+        let mut document = cmp::load(&cmp_path).unwrap();
+        let (entry, items) = prepare_entry("title".into(), "Hello".into(), 0, None);
+
+        validate_cmp_source(
+            &document,
+            &quests,
+            "lang",
+            std::slice::from_ref(&entry),
+            &items,
+        )
+        .unwrap();
+        assert!(validate_cmp_source(
+            &document,
+            &other,
+            "lang",
+            std::slice::from_ref(&entry),
+            &items
+        )
+        .is_err());
+
+        document.records[0].source = "Changed".into();
+        assert!(validate_cmp_source(
+            &document,
+            &quests,
+            "lang",
+            std::slice::from_ref(&entry),
+            &items
+        )
+        .is_err());
+    }
+
+    #[test]
     fn cmp_is_validated_before_it_writes_the_language_file() {
         let directory = tempdir().unwrap();
         let quests = directory.path().join("config/ftbquests/quests");
@@ -1758,6 +1885,28 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result["report"]["translated_entries"], 1);
+        let translated = snbt::load(&quests.join("lang/zh_cn.snbt")).unwrap();
+        assert_eq!(translated[0].1, LangValue::Text("你好".into()));
+    }
+
+    #[test]
+    fn history_failure_after_commit_does_not_report_writeback_failure() {
+        let directory = tempdir().unwrap();
+        let quests = directory.path().join("config/ftbquests/quests");
+        fs::create_dir_all(quests.join("lang")).unwrap();
+        fs::write(quests.join("lang/en_us.snbt"), r#"{ title: "Hello" }"#).unwrap();
+        let cmp_path = directory.path().join("review.cmp");
+        write_test_cmp(&cmp_path, &quests, "Hello", "Hello", "你好");
+        let unusable_data_dir = directory.path().join("app-data-file");
+        fs::write(&unusable_data_dir, "not a directory").unwrap();
+
+        let result = apply_cmp(
+            &unusable_data_dir,
+            &json!({"cmp_path":cmp_path,"quests_dir":quests.display().to_string()}),
+        )
+        .unwrap();
+
+        assert_eq!(result["run_id"], 0);
         let translated = snbt::load(&quests.join("lang/zh_cn.snbt")).unwrap();
         assert_eq!(translated[0].1, LangValue::Text("你好".into()));
     }
@@ -1799,5 +1948,20 @@ mod tests {
 
         assert!(commit_outputs(&outputs, "test-task").is_err());
         assert_eq!(fs::read_to_string(first).unwrap(), "original");
+    }
+
+    #[test]
+    fn backups_created_in_the_same_second_never_overwrite_each_other() {
+        let directory = tempdir().unwrap();
+        let quests = directory.path().join("quests");
+        fs::create_dir_all(quests.join("lang")).unwrap();
+        fs::write(quests.join("lang/en_us.snbt"), "{a: \"A\"}").unwrap();
+
+        let first = backup(&quests, "lang").unwrap();
+        let second = backup(&quests, "lang").unwrap();
+
+        assert_ne!(first, second);
+        assert!(first.join("lang/en_us.snbt").is_file());
+        assert!(second.join("lang/en_us.snbt").is_file());
     }
 }

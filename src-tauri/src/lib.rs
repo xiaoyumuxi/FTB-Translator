@@ -101,7 +101,19 @@ fn bridge(app: tauri::AppHandle, command: String, payload: Option<Value>) -> Res
 fn start_translation(app: tauri::AppHandle, mut payload: Value) -> Result<(), String> {
     let dir = data_dir(&app)?;
     let task_app = app.clone();
-    let task_id = logging::task_id();
+    let task_id = if let Some(path) = payload["retry_cmp_path"]
+        .as_str()
+        .filter(|path| !path.trim().is_empty())
+    {
+        let document = cmp::load(std::path::Path::new(path))?;
+        if document.meta.task_id.trim().is_empty() {
+            logging::task_id()
+        } else {
+            document.meta.task_id
+        }
+    } else {
+        logging::task_id()
+    };
     payload["_task_id"] = json!(task_id);
     tauri::async_runtime::spawn(async move {
         if let Err(e) = core::translate(task_app.clone(), dir, payload).await {

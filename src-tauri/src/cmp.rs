@@ -3,6 +3,19 @@ use std::{collections::HashSet, fs, path::Path};
 
 const HEADER: &str = "# FTB Translater CMP v1";
 
+fn supported_status(status: &str) -> bool {
+    matches!(
+        status,
+        "translated"
+            | "unchanged"
+            | "review"
+            | "rate_limited"
+            | "request_failed"
+            | "format_guard"
+            | "fallback"
+    )
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Meta {
     pub version: u32,
@@ -123,6 +136,13 @@ pub fn parse(content: &str) -> Result<Document, String> {
             .ok_or_else(|| format!("CMP 第 {} 行缺少 @ 回填位置", line_index + 1))?;
         let location = serde_json::from_str::<Location>(raw_location)
             .map_err(|e| format!("CMP 第 {} 行回填位置无效：{e}", line_index + 1))?;
+        if !supported_status(&location.status) {
+            return Err(format!(
+                "CMP 第 {} 行包含不支持的状态：{}",
+                line_index + 1,
+                location.status
+            ));
+        }
         if !locations.insert((location.entry_id.clone(), location.path.clone())) {
             return Err(format!("CMP 第 {} 行重复定义同一回填位置", line_index + 1));
         }
@@ -232,6 +252,19 @@ mod tests {
         content.push_str("\"A\" -> \"乙\"\n");
         assert!(parse(&content).is_err());
         assert!(parse_pair(r#""A -> B" => "甲""#).is_err());
+    }
+
+    #[test]
+    fn rejects_unknown_status_but_accepts_legacy_fallback() {
+        let mut content = String::from(HEADER);
+        content.push_str("\n# meta ");
+        content.push_str(&serde_json::to_string(&document().meta).unwrap());
+        content.push_str("\n@ {\"file\":\"lang/en_us.snbt\",\"entry_id\":\"a\",\"path\":\"$\",\"status\":\"invented\"}\n");
+        content.push_str("\"A\" -> \"甲\"\n");
+        assert!(parse(&content).is_err());
+
+        let compatible = content.replace("invented", "fallback");
+        assert_eq!(parse(&compatible).unwrap().records[0].status, "fallback");
     }
 
     #[test]
