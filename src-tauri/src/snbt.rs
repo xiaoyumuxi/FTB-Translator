@@ -128,6 +128,10 @@ impl<'a> Parser<'a> {
                 self.bump();
             }
         }
+        self.skip();
+        if self.peek().is_some() {
+            return Err(format!("SNBT 在偏移 {} 后包含多余内容", self.pos));
+        }
         Ok(out)
     }
 }
@@ -184,5 +188,10 @@ mod tests {
         let src = "{ title: \"Hello\", desc: [\"A\", \"B\"] }";
         let v = parse(src).unwrap();
         assert_eq!(parse(&dump(&v)).unwrap(), v)
+    }
+
+    #[test]
+    fn rejects_trailing_content_after_the_root_compound() {
+        assert!(parse(r#"{ title: "Hello" } malicious"#).is_err());
     }
 }

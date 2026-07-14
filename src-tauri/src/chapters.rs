@@ -1,6 +1,7 @@
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashSet,
     fs,
     path::{Path, PathBuf},
     sync::OnceLock,
@@ -56,6 +57,65 @@ fn quote(s: &str, q: char) -> String {
             .replace('\t', "\\t")
     )
 }
+
+fn validate_structure(text: &str) -> Result<(), String> {
+    let mut chars = text.chars().peekable();
+    let mut stack = Vec::new();
+    let mut quote = None;
+    let mut escaped = false;
+    let mut comment = false;
+    while let Some(character) = chars.next() {
+        if comment {
+            if character == '\n' {
+                comment = false;
+            }
+            continue;
+        }
+        if let Some(delimiter) = quote {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == delimiter {
+                quote = None;
+            }
+            continue;
+        }
+        if character == '/' && chars.peek() == Some(&'/') {
+            chars.next();
+            comment = true;
+            continue;
+        }
+        if character == '#' {
+            comment = true;
+            continue;
+        }
+        match character {
+            '\'' | '"' => quote = Some(character),
+            '{' | '[' | '(' => stack.push(character),
+            '}' | ']' | ')' => {
+                let expected = match character {
+                    '}' => '{',
+                    ']' => '[',
+                    ')' => '(',
+                    _ => unreachable!(),
+                };
+                if stack.pop() != Some(expected) {
+                    return Err(format!("章节 SNBT 的 {character} 没有匹配的起始括号"));
+                }
+            }
+            _ => {}
+        }
+    }
+    if quote.is_some() || escaped {
+        return Err("章节 SNBT 存在未闭合的字符串".into());
+    }
+    if !stack.is_empty() {
+        return Err("章节 SNBT 存在未闭合的括号".into());
+    }
+    Ok(())
+}
+
 pub fn extract(path: &Path) -> Result<Vec<Segment>, String> {
     static FIELD: OnceLock<Regex> = OnceLock::new();
     static STRINGS: OnceLock<Regex> = OnceLock::new();
@@ -109,6 +169,14 @@ pub fn render_replacements(
     replacements: &[(usize, String)],
 ) -> Result<(String, usize), String> {
     let mut text = fs::read_to_string(path).map_err(|e| e.to_string())?;
+    validate_structure(&text)?;
+    let mut indices = HashSet::new();
+    if replacements
+        .iter()
+        .any(|(index, _)| !indices.insert(*index))
+    {
+        return Err("章节写回包含重复的翻译位置".into());
+    }
     let segs = extract(path)?;
     let mut matches = segs
         .into_iter()
@@ -119,10 +187,14 @@ pub fn render_replacements(
                 .map(|x| (s, x.1.clone()))
         })
         .collect::<Vec<_>>();
+    if matches.len() != replacements.len() {
+        return Err("章节写回位置与原文件不一致，已取消写入".into());
+    }
     matches.sort_by_key(|x| std::cmp::Reverse(x.0.start));
     for (s, t) in &matches {
         text.replace_range(s.start..s.end, &quote(t, s.quote));
     }
+    validate_structure(&text)?;
     Ok((text, matches.len()))
 }
 pub fn replace(path: &Path, replacements: &[(usize, String)]) -> Result<usize, String> {
@@ -148,5 +220,26 @@ mod tests {
         assert_eq!(s.len(), 2);
         assert_eq!(replace(&p, &[(0, "你好".into())]).unwrap(), 1);
         assert!(fs::read_to_string(p).unwrap().contains("你好"));
+    }
+
+    #[test]
+    fn replacement_text_cannot_escape_the_original_snbt_string() {
+        let d = tempdir().unwrap();
+        let p = d.path().join("a.snbt");
+        fs::write(&p, r#"{ title: "Hello" }"#).unwrap();
+        let injected = r#""}], malicious: { value: 1 }, text: ""#;
+        let (rendered, count) = render_replacements(&p, &[(0, injected.into())]).unwrap();
+        assert_eq!(count, 1);
+        validate_structure(&rendered).unwrap();
+        assert!(rendered.contains(r#"\"}], malicious"#));
+    }
+
+    #[test]
+    fn rejects_missing_or_duplicate_replacement_positions() {
+        let d = tempdir().unwrap();
+        let p = d.path().join("a.snbt");
+        fs::write(&p, r#"{ title: "Hello" }"#).unwrap();
+        assert!(render_replacements(&p, &[(4, "你好".into())]).is_err());
+        assert!(render_replacements(&p, &[(0, "甲".into()), (0, "乙".into())]).is_err());
     }
 }

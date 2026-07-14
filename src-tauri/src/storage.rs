@@ -22,6 +22,7 @@ pub struct Settings {
     pub style: String,
     pub batch_size: String,
     pub concurrency: String,
+    pub log_level: String,
     pub glossary_enabled: bool,
     pub glossary_path: String,
     #[serde(default, skip_serializing)]
@@ -39,6 +40,7 @@ impl Default for Settings {
             style: "自然玩家向简体中文汉化".into(),
             batch_size: "auto".into(),
             concurrency: "auto".into(),
+            log_level: "info".into(),
             glossary_enabled: false,
             glossary_path: String::new(),
             glossary_fingerprint: String::new(),
@@ -54,6 +56,8 @@ struct Config {
     style: String,
     batch_size: String,
     concurrency: String,
+    #[serde(default = "default_log_level")]
+    log_level: String,
     #[serde(default)]
     glossary_enabled: bool,
     #[serde(default)]
@@ -61,6 +65,9 @@ struct Config {
 }
 fn default_provider() -> String {
     crate::providers::GOOGLE_WEB.into()
+}
+fn default_log_level() -> String {
+    "info".into()
 }
 fn entry(provider: &str) -> Result<keyring::Entry, String> {
     let account = if provider == crate::providers::OPENAI_COMPATIBLE {
@@ -96,12 +103,30 @@ fn cache_credential(provider: &str, value: Option<&str>) {
 pub fn translation_api_key(provider: &str) -> Result<String, String> {
     crate::providers::normalize(provider)?;
     if let Some(value) = cached_credential(provider) {
+        crate::logging::debug(
+            "credential",
+            "credential_cache_hit",
+            "使用当前会话缓存的服务凭证",
+            json!({"provider":provider}),
+        );
         return Ok(value);
     }
+    crate::logging::info(
+        "credential",
+        "credential_read_started",
+        "翻译任务按需读取系统凭证",
+        json!({"provider":provider}),
+    );
     let value = entry(provider)?
         .get_password()
         .map_err(|_| "没有可用的 API Key，请在设置中查看或修改 API Key 后重试".to_string())?;
     cache_credential(provider, Some(&value));
+    crate::logging::info(
+        "credential",
+        "credential_read_completed",
+        "系统凭证已加载到当前会话",
+        json!({"provider":provider,"has_value":!value.is_empty()}),
+    );
     Ok(value)
 }
 pub fn load_settings(dir: &Path) -> Settings {
@@ -121,12 +146,23 @@ pub fn load_settings(dir: &Path) -> Settings {
             s.style = c.style;
             s.batch_size = c.batch_size;
             s.concurrency = c.concurrency;
+            s.log_level = if c.log_level.parse::<crate::logging::Level>().is_ok() {
+                c.log_level
+            } else {
+                default_log_level()
+            };
             s.glossary_enabled = c.glossary_enabled;
             if !c.glossary_path.trim().is_empty() {
                 s.glossary_path = c.glossary_path;
             }
         }
     }
+    crate::logging::debug(
+        "settings",
+        "settings_loaded",
+        "普通设置已加载",
+        json!({"provider":s.provider,"log_level":s.log_level,"glossary_enabled":s.glossary_enabled}),
+    );
     s
 }
 pub fn save_settings(dir: &Path, v: &Value) -> Result<Value, String> {
@@ -152,6 +188,8 @@ pub fn save_settings(dir: &Path, v: &Value) -> Result<Value, String> {
     crate::providers::normalize(provider)?;
     let web_provider = !crate::providers::requires_api_key(provider);
     let glossary_enabled = !web_provider && v["glossary_enabled"].as_bool().unwrap_or(false);
+    let log_level = v["log_level"].as_str().unwrap_or("info").trim();
+    log_level.parse::<crate::logging::Level>()?;
     let glossary_path = match v["glossary_path"].as_str().unwrap_or("").trim() {
         "" => crate::glossary::ensure_default(dir)?,
         path => PathBuf::from(path),
@@ -174,6 +212,7 @@ pub fn save_settings(dir: &Path, v: &Value) -> Result<Value, String> {
         } else {
             parse("concurrency")?
         },
+        log_level: log_level.into(),
         glossary_enabled,
         glossary_path: glossary_path.display().to_string(),
     };
@@ -182,26 +221,59 @@ pub fn save_settings(dir: &Path, v: &Value) -> Result<Value, String> {
     // Otherwise a rejected settings form can still replace or delete a working key.
     let config = serde_json::to_vec_pretty(&c).map_err(|e| e.to_string())?;
     fs::write(dir.join("settings.json"), config).map_err(|e| e.to_string())?;
+    crate::logging::set_level(log_level)?;
     if v["api_key_changed"].as_bool().unwrap_or(false) {
         let key = v["api_key"].as_str().unwrap_or("").trim();
         let e = entry(provider)?;
         if key.is_empty() {
             let _ = e.delete_credential();
             cache_credential(provider, None);
+            crate::logging::info(
+                "credential",
+                "credential_deleted",
+                "用户删除了服务凭证",
+                json!({"provider":provider}),
+            );
         } else {
             e.set_password(key)
                 .map_err(|e| format!("无法保存系统凭证：{e}"))?;
             cache_credential(provider, Some(key));
+            crate::logging::info(
+                "credential",
+                "credential_saved",
+                "用户保存了新的服务凭证",
+                json!({"provider":provider}),
+            );
         }
     }
-    Ok(json!({"credential_backend":"系统凭证管理器","glossary_path":glossary_path}))
+    crate::logging::info(
+        "settings",
+        "settings_saved",
+        "设置已保存",
+        json!({"provider":provider,"log_level":log_level}),
+    );
+    Ok(
+        json!({"credential_backend":"系统凭证管理器","glossary_path":glossary_path,"log_level":log_level}),
+    )
 }
 
 pub fn provider_credential(provider: &str) -> Result<Value, String> {
     crate::providers::normalize(provider)?;
     let api_key = if let Some(value) = cached_credential(provider) {
+        crate::logging::debug(
+            "credential",
+            "credential_view_cache_hit",
+            "从当前会话返回凭证状态",
+            json!({"provider":provider}),
+        );
         value
     } else {
+        crate::logging::info(
+            "credential",
+            "credential_view_requested",
+            "用户明确请求查看系统凭证",
+            json!({"provider":provider}),
+        );
         let value = entry(provider)?.get_password().unwrap_or_default();
         cache_credential(provider, Some(&value));
         value
@@ -242,18 +314,37 @@ impl History {
             tx.execute("INSERT INTO translation_files(run_id,filename,mapping,output_content)VALUES(?,?,?,?)",params![id,name,map.to_string(),content]).map_err(|e|e.to_string())?;
         }
         tx.commit().map_err(|e| e.to_string())?;
+        crate::logging::info(
+            "history",
+            "history_inserted",
+            "翻译历史已保存",
+            json!({"run_id":id,"mode":mode,"pack_name":pack_name(quests)}),
+        );
         Ok(id)
     }
     pub fn list(&self) -> Result<Value, String> {
         let c = self.conn()?;
         let mut q=c.prepare("SELECT id,pack_name,quests_dir,mode,model,style,total_entries,translated_entries,cache_hits,failed_count,warning_count,created_at FROM translation_runs ORDER BY created_at DESC,id DESC LIMIT 100").map_err(|e|e.to_string())?;
         let rows=q.query_map([],|r|Ok(json!({"id":r.get::<_,i64>(0)?,"pack_name":r.get::<_,String>(1)?,"quests_dir":r.get::<_,String>(2)?,"mode":r.get::<_,String>(3)?,"model":r.get::<_,String>(4)?,"style":r.get::<_,String>(5)?,"total_entries":r.get::<_,i64>(6)?,"translated_entries":r.get::<_,i64>(7)?,"cache_hits":r.get::<_,i64>(8)?,"failed_count":r.get::<_,i64>(9)?,"warning_count":r.get::<_,i64>(10)?,"created_at":r.get::<_,String>(11)?}))).map_err(|e|e.to_string())?;
-        Ok(Value::Array(rows.filter_map(Result::ok).collect()))
+        let rows = rows.filter_map(Result::ok).collect::<Vec<_>>();
+        crate::logging::debug(
+            "history",
+            "history_listed",
+            "翻译历史列表已读取",
+            json!({"count":rows.len()}),
+        );
+        Ok(Value::Array(rows))
     }
     pub fn delete(&self, id: i64) -> Result<(), String> {
         let c = self.conn()?;
         c.execute("DELETE FROM translation_runs WHERE id=?", [id])
             .map_err(|e| e.to_string())?;
+        crate::logging::info(
+            "history",
+            "history_deleted",
+            "翻译历史已删除",
+            json!({"run_id":id}),
+        );
         Ok(())
     }
     pub fn export(&self, id: i64, dest: &Path) -> Result<(), String> {
@@ -289,6 +380,12 @@ impl History {
                 .map_err(|e| e.to_string())?;
         }
         zip.finish().map_err(|e| e.to_string())?;
+        crate::logging::info(
+            "history",
+            "history_exported",
+            "翻译历史已导出",
+            json!({"run_id":id,"destination":dest}),
+        );
         Ok(())
     }
 }

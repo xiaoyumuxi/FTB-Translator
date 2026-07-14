@@ -1,4 +1,4 @@
-use crate::storage::Settings;
+use crate::{logging, storage::Settings};
 use reqwest::{header, Client, Response, StatusCode};
 use serde_json::{json, Map, Value};
 use std::{collections::HashMap, time::Duration};
@@ -34,12 +34,13 @@ pub async fn request(
     client: &Client,
     settings: &Settings,
     batch: &[(String, String)],
+    task_id: &str,
 ) -> Result<HashMap<String, String>, String> {
     match normalize(&settings.provider)? {
-        DEEPL => request_deepl(client, settings, batch).await,
-        GOOGLE_WEB => request_google(client, settings, batch).await,
-        DEEPL_WEB => request_deepl_web(client, settings, batch).await,
-        _ => request_openai(client, settings, batch).await,
+        DEEPL => request_deepl(client, settings, batch, task_id).await,
+        GOOGLE_WEB => request_google(client, settings, batch, task_id).await,
+        DEEPL_WEB => request_deepl_web(client, settings, batch, task_id).await,
+        _ => request_openai(client, settings, batch, task_id).await,
     }
 }
 
@@ -47,6 +48,7 @@ async fn request_openai(
     client: &Client,
     s: &Settings,
     batch: &[(String, String)],
+    task_id: &str,
 ) -> Result<HashMap<String, String>, String> {
     let input = batch
         .iter()
@@ -65,6 +67,12 @@ async fn request_openai(
     let mut use_response_format = true;
     let mut last = String::new();
     for attempt in 0..3 {
+        logging::debug(
+            "provider",
+            "openai_attempt_started",
+            "OpenAI 兼容接口请求尝试开始",
+            json!({"task_id":task_id,"provider":s.provider,"attempt":attempt + 1,"batch_size":batch.len()}),
+        );
         let mut body = json!({"model":s.model,"messages":messages,"temperature":0.2});
         if use_response_format {
             body["response_format"] = json!({"type":"json_object"});
@@ -80,6 +88,12 @@ async fn request_openai(
                 let status = response.status();
                 let text = response.text().await.unwrap_or_default();
                 if !status.is_success() {
+                    logging::warn(
+                        "provider",
+                        "openai_http_failed",
+                        "OpenAI 兼容接口返回失败状态",
+                        json!({"task_id":task_id,"provider":s.provider,"attempt":attempt + 1,"http_status":status.as_u16()}),
+                    );
                     if use_response_format
                         && matches!(
                             status,
@@ -100,12 +114,26 @@ async fn request_openai(
                         .ok_or("OpenAI 兼容接口返回内容为空")?;
                     let map = parse_json_map(content)?;
                     if batch.iter().all(|(id, _)| map.contains_key(id)) {
+                        logging::debug(
+                            "provider",
+                            "openai_attempt_completed",
+                            "OpenAI 兼容接口请求成功",
+                            json!({"task_id":task_id,"provider":s.provider,"attempt":attempt + 1,"returned_entries":map.len()}),
+                        );
                         return Ok(map);
                     }
                     last = "OpenAI 兼容接口返回内容缺少条目".into();
                 }
             }
-            Err(error) => last = error.to_string(),
+            Err(error) => {
+                logging::warn(
+                    "provider",
+                    "openai_network_failed",
+                    "OpenAI 兼容接口网络请求失败",
+                    json!({"task_id":task_id,"provider":s.provider,"attempt":attempt + 1,"error":error.to_string()}),
+                );
+                last = error.to_string();
+            }
         }
         if attempt < 2 {
             tokio::time::sleep(Duration::from_millis(800 * (attempt + 1))).await;
@@ -134,6 +162,7 @@ async fn request_deepl(
     client: &Client,
     s: &Settings,
     batch: &[(String, String)],
+    task_id: &str,
 ) -> Result<HashMap<String, String>, String> {
     let url = format!("{}/v2/translate", s.base_url.trim_end_matches('/'));
     let body = json!({
@@ -141,7 +170,7 @@ async fn request_deepl(
         "source_lang": "EN",
         "target_lang": "ZH-HANS"
     });
-    let response = send_with_retry(|| {
+    let response = send_with_retry(DEEPL, task_id, || {
         client
             .post(&url)
             .header(
@@ -158,6 +187,7 @@ async fn request_google(
     client: &Client,
     s: &Settings,
     batch: &[(String, String)],
+    task_id: &str,
 ) -> Result<HashMap<String, String>, String> {
     let mut units = vec![];
     for (id, text) in batch {
@@ -174,7 +204,7 @@ async fn request_google(
     for unit in units {
         let size = unit.1.chars().count() + 40;
         if !chunk.is_empty() && chars + size > GOOGLE_MAX_CHARS {
-            append_google_chunk(client, s, &chunk, &mut result).await?;
+            append_google_chunk(client, s, &chunk, &mut result, task_id).await?;
             chunk.clear();
             chars = 0;
         }
@@ -182,7 +212,7 @@ async fn request_google(
         chars += size;
     }
     if !chunk.is_empty() {
-        append_google_chunk(client, s, &chunk, &mut result).await?;
+        append_google_chunk(client, s, &chunk, &mut result, task_id).await?;
     }
     Ok(result)
 }
@@ -192,6 +222,7 @@ async fn append_google_chunk(
     s: &Settings,
     chunk: &[(String, String)],
     result: &mut HashMap<String, String>,
+    task_id: &str,
 ) -> Result<(), String> {
     let markers = (0..chunk.len())
         .map(|index| format!("⟪FTB_TRANSLATER_BATCH_{index}⟫"))
@@ -210,7 +241,7 @@ async fn append_google_chunk(
         ("dt", "t"),
         ("q", combined.as_str()),
     ];
-    let response = send_with_retry(|| {
+    let response = send_with_retry(GOOGLE_WEB, task_id, || {
         client
             .post(&url)
             .header(header::USER_AGENT, USER_AGENT)
@@ -258,6 +289,7 @@ async fn request_deepl_web(
     client: &Client,
     s: &Settings,
     batch: &[(String, String)],
+    task_id: &str,
 ) -> Result<HashMap<String, String>, String> {
     let mut units = vec![];
     for (id, text) in batch {
@@ -274,7 +306,7 @@ async fn request_deepl_web(
     for unit in units {
         let size = unit.1.chars().count();
         if !chunk.is_empty() && chars + size > DEEPL_WEB_MAX_CHARS {
-            append_deepl_web_chunk(client, s, &chunk, &mut result).await?;
+            append_deepl_web_chunk(client, s, &chunk, &mut result, task_id).await?;
             chunk.clear();
             chars = 0;
         }
@@ -282,7 +314,7 @@ async fn request_deepl_web(
         chars += size;
     }
     if !chunk.is_empty() {
-        append_deepl_web_chunk(client, s, &chunk, &mut result).await?;
+        append_deepl_web_chunk(client, s, &chunk, &mut result, task_id).await?;
     }
     Ok(result)
 }
@@ -292,6 +324,7 @@ async fn append_deepl_web_chunk(
     s: &Settings,
     chunk: &[(String, String)],
     result: &mut HashMap<String, String>,
+    task_id: &str,
 ) -> Result<(), String> {
     let url = format!("{}/v1/translate", s.base_url.trim_end_matches('/'));
     let body = json!({
@@ -307,7 +340,7 @@ async fn append_deepl_web_chunk(
             "instance_id": format!("00000000-0000-4000-8000-{:012x}", std::process::id())
         }
     });
-    let response = send_with_retry(|| {
+    let response = send_with_retry(DEEPL_WEB, task_id, || {
         client
             .post(&url)
             .header(header::AUTHORIZATION, "None")
@@ -362,20 +395,48 @@ async fn ordered_translation_values(response: Response) -> Result<Vec<String>, S
         .collect()
 }
 
-async fn send_with_retry<F>(mut build: F) -> Result<Response, String>
+async fn send_with_retry<F>(provider: &str, task_id: &str, mut build: F) -> Result<Response, String>
 where
     F: FnMut() -> reqwest::RequestBuilder,
 {
     let mut last = String::new();
     for attempt in 0..3 {
+        logging::debug(
+            "provider",
+            "http_attempt_started",
+            "翻译接口请求尝试开始",
+            json!({"task_id":task_id,"provider":provider,"attempt":attempt + 1}),
+        );
         match build().send().await {
-            Ok(response) if response.status().is_success() => return Ok(response),
+            Ok(response) if response.status().is_success() => {
+                logging::debug(
+                    "provider",
+                    "http_attempt_completed",
+                    "翻译接口请求成功",
+                    json!({"task_id":task_id,"provider":provider,"attempt":attempt + 1,"http_status":response.status().as_u16()}),
+                );
+                return Ok(response);
+            }
             Ok(response) => {
                 let status = response.status();
+                logging::warn(
+                    "provider",
+                    "http_attempt_failed",
+                    "翻译接口返回失败状态",
+                    json!({"task_id":task_id,"provider":provider,"attempt":attempt + 1,"http_status":status.as_u16()}),
+                );
                 let body = response.text().await.unwrap_or_default();
                 last = format!("HTTP {status}: {body}");
             }
-            Err(error) => last = error.to_string(),
+            Err(error) => {
+                logging::warn(
+                    "provider",
+                    "http_network_failed",
+                    "翻译接口网络请求失败",
+                    json!({"task_id":task_id,"provider":provider,"attempt":attempt + 1,"error":error.to_string()}),
+                );
+                last = error.to_string();
+            }
         }
         if attempt < 2 {
             tokio::time::sleep(Duration::from_millis(1000 * (attempt + 1))).await;
@@ -473,7 +534,9 @@ mod tests {
                     model: model.into(),
                     ..Settings::default()
                 };
-                let translated = request(&client, &settings, &batch).await.unwrap();
+                let translated = request(&client, &settings, &batch, "live-smoke-test")
+                    .await
+                    .unwrap();
                 assert_eq!(translated.len(), batch.len());
                 assert!(translated["desc"].contains("⟨P_0⟩"));
                 assert!(translated["desc"].contains("⟨P_1⟩"));
