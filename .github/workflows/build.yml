@@ -45,6 +45,7 @@ jobs:
     name: Package (${{ matrix.os }})
     needs: test
     if: >-
+      github.event_name == 'push' ||
       github.event_name == 'release' ||
       github.event_name == 'workflow_dispatch' ||
       startsWith(github.ref, 'refs/tags/v')
