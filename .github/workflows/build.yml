@@ -24,7 +24,7 @@ jobs:
     name: Rust quality gates
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -47,8 +47,8 @@ jobs:
     name: Frontend quality gates
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: npm
@@ -58,7 +58,7 @@ jobs:
         run: npm run build
 
   package:
-    name: Package (${{ matrix.platform }})
+    name: Package installers
     needs: [rust-quality, frontend-quality]
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     strategy:
@@ -71,8 +71,8 @@ jobs:
             platform: macos
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: npm
@@ -91,7 +91,7 @@ jobs:
           echo "value=$VERSION" >> "$GITHUB_OUTPUT"
       - name: Build Tauri installer
         run: npm run tauri -- build
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: FTB-Translater-v${{ steps.version.outputs.value }}-${{ matrix.platform }}
           path: |
@@ -110,10 +110,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           path: release-artifacts
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
           files: release-artifacts/**/*
