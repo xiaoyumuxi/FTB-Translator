@@ -17,6 +17,7 @@ fn supported_status(status: &str) -> bool {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct Meta {
     pub version: u32,
     #[serde(default)]
@@ -51,6 +52,7 @@ pub struct Document {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Location {
     file: String,
     entry_id: String,
@@ -59,6 +61,7 @@ struct Location {
 }
 
 pub fn write(path: &Path, document: &Document) -> Result<(), String> {
+    validate_document(document)?;
     let mut output = String::new();
     output.push_str(HEADER);
     output.push('\n');
@@ -66,8 +69,13 @@ pub fn write(path: &Path, document: &Document) -> Result<(), String> {
     output.push_str("# meta ");
     output.push_str(&serde_json::to_string(&document.meta).map_err(|e| e.to_string())?);
     output.push_str("\n\n");
+    // CMP file sections are presentation-only, but keeping them in a canonical order
+    // makes repeated saves stable. Rust's slice sort is stable, so source order within
+    // each file remains unchanged.
+    let mut records = document.records.iter().collect::<Vec<_>>();
+    records.sort_by(|left, right| left.file.cmp(&right.file));
     let mut current_file = None;
-    for record in &document.records {
+    for record in records {
         if current_file != Some(record.file.as_str()) {
             output.push_str("## file ");
             output.push_str(&serde_json::to_string(&record.file).map_err(|e| e.to_string())?);
@@ -96,6 +104,25 @@ pub fn write(path: &Path, document: &Document) -> Result<(), String> {
     fs::write(path, output).map_err(|e| format!("无法保存 CMP 校对文件：{e}"))
 }
 
+fn validate_document(document: &Document) -> Result<(), String> {
+    if document.meta.version != 1 {
+        return Err(format!("不支持 CMP 版本 {}", document.meta.version));
+    }
+    if document.records.is_empty() {
+        return Err("CMP 文件没有翻译条目".into());
+    }
+    let mut locations = HashSet::new();
+    for record in &document.records {
+        if !supported_status(&record.status) {
+            return Err(format!("CMP 包含不支持的状态：{}", record.status));
+        }
+        if !locations.insert((record.entry_id.as_str(), record.path.as_str())) {
+            return Err("CMP 重复定义同一回填位置".into());
+        }
+    }
+    Ok(())
+}
+
 pub fn load(path: &Path) -> Result<Document, String> {
     let content = fs::read_to_string(path)
         .map_err(|e| format!("无法读取 CMP 校对文件 {}：{e}", path.display()))?;
@@ -111,6 +138,7 @@ pub fn parse(content: &str) -> Result<Document, String> {
     let mut meta = None;
     let mut records = Vec::new();
     let mut locations = HashSet::new();
+    let mut current_file = None;
     while let Some((line_index, line)) = lines.next() {
         let line = line.trim();
         if line.is_empty() {
@@ -128,6 +156,13 @@ pub fn parse(content: &str) -> Result<Document, String> {
             meta = Some(value);
             continue;
         }
+        if let Some(raw) = line.strip_prefix("## file ") {
+            current_file = Some(
+                serde_json::from_str::<String>(raw)
+                    .map_err(|e| format!("CMP 第 {} 行文件分组无效：{e}", line_index + 1))?,
+            );
+            continue;
+        }
         if line.starts_with('#') {
             continue;
         }
@@ -136,6 +171,15 @@ pub fn parse(content: &str) -> Result<Document, String> {
             .ok_or_else(|| format!("CMP 第 {} 行缺少 @ 回填位置", line_index + 1))?;
         let location = serde_json::from_str::<Location>(raw_location)
             .map_err(|e| format!("CMP 第 {} 行回填位置无效：{e}", line_index + 1))?;
+        if current_file
+            .as_deref()
+            .is_some_and(|file| file != location.file)
+        {
+            return Err(format!(
+                "CMP 第 {} 行的文件归属与当前 ## file 分组不一致",
+                line_index + 1
+            ));
+        }
         if !supported_status(&location.status) {
             return Err(format!(
                 "CMP 第 {} 行包含不支持的状态：{}",
@@ -242,6 +286,139 @@ mod tests {
     }
 
     #[test]
+    fn parse_write_parse_preserves_data_and_canonical_output() {
+        let meta = serde_json::to_string(&document().meta).unwrap();
+        let original = format!(
+            r#"{HEADER}
+# 旧版编辑器添加的普通注释
+# meta {meta}
+
+## file "chapters/alpha.snbt"
+
+@ {{"file":"chapters/alpha.snbt","entry_id":"alpha:0:description","path":"/extra/0/text","status":"translated"}}
+"first line\n第二行 ☃" -> "第一行\nsecond line 🚀"
+
+@ {{"file":"chapters/alpha.snbt","entry_id":"alpha:1:subtitle","path":"$","status":"unchanged"}}
+"" -> ""
+
+## file "chapters/zeta.snbt"
+
+@ {{"file":"chapters/zeta.snbt","entry_id":"zeta:0:title","path":"$","status":"review"}}
+"contains -> arrow and \"quotes\"" -> "路径 C:\\模组\\任务"
+"#
+        );
+        let first = parse(&original).unwrap();
+        let dir = tempdir().unwrap();
+        let first_path = dir.path().join("first.cmp");
+        let second_path = dir.path().join("second.cmp");
+
+        write(&first_path, &first).unwrap();
+        let second = load(&first_path).unwrap();
+        assert_eq!(second, first);
+
+        write(&second_path, &second).unwrap();
+        assert_eq!(
+            fs::read_to_string(first_path).unwrap(),
+            fs::read_to_string(second_path).unwrap()
+        );
+    }
+
+    #[test]
+    fn writer_groups_files_in_stable_order_without_reordering_a_file() {
+        let mut expected = document();
+        expected.records = vec![
+            Record {
+                file: "chapters/z.snbt".into(),
+                entry_id: "z:0:title".into(),
+                path: "$".into(),
+                source: "Z0".into(),
+                target: "零".into(),
+                status: "translated".into(),
+            },
+            Record {
+                file: "chapters/a.snbt".into(),
+                entry_id: "a:0:title".into(),
+                path: "$".into(),
+                source: "A0".into(),
+                target: "甲".into(),
+                status: "translated".into(),
+            },
+            Record {
+                file: "chapters/z.snbt".into(),
+                entry_id: "z:1:title".into(),
+                path: "$".into(),
+                source: "Z1".into(),
+                target: "乙".into(),
+                status: "review".into(),
+            },
+        ];
+        expected.meta.total_entries = expected.records.len();
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("ordered.cmp");
+        write(&path, &expected).unwrap();
+
+        let parsed = load(&path).unwrap();
+        let ids = parsed
+            .records
+            .iter()
+            .map(|record| record.entry_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, ["a:0:title", "z:0:title", "z:1:title"]);
+        let content = fs::read_to_string(path).unwrap();
+        assert!(
+            content.find("chapters/a.snbt").unwrap() < content.find("chapters/z.snbt").unwrap()
+        );
+        let location = content.lines().find(|line| line.starts_with("@ ")).unwrap();
+        assert_eq!(
+            location,
+            r#"@ {"file":"chapters/a.snbt","entry_id":"a:0:title","path":"$","status":"translated"}"#
+        );
+        let meta = content
+            .lines()
+            .find(|line| line.starts_with("# meta "))
+            .unwrap();
+        for fields in [
+            ["\"version\"", "\"task_id\""],
+            ["\"task_id\"", "\"quests_dir\""],
+            ["\"quests_dir\"", "\"mode\""],
+            ["\"mode\"", "\"source_fingerprint\""],
+            ["\"source_fingerprint\"", "\"provider\""],
+            ["\"provider\"", "\"base_url\""],
+            ["\"base_url\"", "\"model\""],
+            ["\"model\"", "\"style\""],
+            ["\"style\"", "\"glossary_enabled\""],
+            ["\"glossary_enabled\"", "\"glossary_fingerprint\""],
+            ["\"glossary_fingerprint\"", "\"total_entries\""],
+            ["\"total_entries\"", "\"cache_hits\""],
+        ] {
+            assert!(meta.find(fields[0]).unwrap() < meta.find(fields[1]).unwrap());
+        }
+    }
+
+    #[test]
+    fn editing_only_the_right_hand_json_string_is_readable() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("review.cmp");
+        write(&path, &document()).unwrap();
+        let original = fs::read_to_string(&path).unwrap();
+        let edited = original.replace(
+            r#""Open -> guide\nnow" -> "立即打开指南""#,
+            r#""Open -> guide\nnow" -> "引用 \"指南\"，然后打开 C:\\mods""#,
+        );
+        assert_ne!(edited, original);
+
+        let before = parse(&original).unwrap();
+        let after = parse(&edited).unwrap();
+        assert_eq!(after.meta, before.meta);
+        assert_eq!(after.records[0].file, before.records[0].file);
+        assert_eq!(after.records[0].entry_id, before.records[0].entry_id);
+        assert_eq!(after.records[0].path, before.records[0].path);
+        assert_eq!(after.records[0].source, before.records[0].source);
+        assert_eq!(after.records[0].status, before.records[0].status);
+        assert_eq!(after.records[0].target, "引用 \"指南\"，然后打开 C:\\mods");
+    }
+
+    #[test]
     fn rejects_duplicate_locations_and_broken_pairs() {
         let mut content = String::from(HEADER);
         content.push_str("\n# meta ");
@@ -268,6 +445,32 @@ mod tests {
     }
 
     #[test]
+    fn accepts_every_v1_status_and_writer_rejects_unknown_status() {
+        for status in [
+            "translated",
+            "unchanged",
+            "review",
+            "rate_limited",
+            "request_failed",
+            "format_guard",
+            "fallback",
+        ] {
+            let mut value = document();
+            value.records[0].status = status.into();
+            let dir = tempdir().unwrap();
+            let path = dir.path().join(format!("{status}.cmp"));
+            write(&path, &value).unwrap();
+            assert_eq!(load(&path).unwrap().records[0].status, status);
+        }
+
+        let mut invalid = document();
+        invalid.records[0].status = "invented".into();
+        let dir = tempdir().unwrap();
+        let error = write(&dir.path().join("invalid.cmp"), &invalid).unwrap_err();
+        assert!(error.contains("invented"));
+    }
+
+    #[test]
     fn metadata_is_json_and_never_contains_arbitrary_values() {
         let value = serde_json::to_value(&document().meta).unwrap();
         assert_eq!(value["version"], serde_json::Value::from(1));
@@ -277,7 +480,51 @@ mod tests {
     fn older_v1_metadata_without_task_id_remains_readable() {
         let mut value = serde_json::to_value(&document().meta).unwrap();
         value.as_object_mut().unwrap().remove("task_id");
-        let parsed: Meta = serde_json::from_value(value).unwrap();
-        assert!(parsed.task_id.is_empty());
+        let content = format!(
+            "{HEADER}\n# meta {}\n@ {{\"file\":\"lang/en_us.snbt\",\"entry_id\":\"a\",\"path\":\"$\",\"status\":\"translated\"}}\n\"A\" -> \"甲\"\n",
+            serde_json::to_string(&value).unwrap()
+        );
+        assert!(parse(&content).unwrap().meta.task_id.is_empty());
+    }
+
+    #[test]
+    fn rejects_missing_required_or_unknown_protected_fields() {
+        let mut missing = serde_json::to_value(&document().meta).unwrap();
+        missing.as_object_mut().unwrap().remove("provider");
+        let missing_content = format!(
+            "{HEADER}\n# meta {}\n@ {{\"file\":\"lang/en_us.snbt\",\"entry_id\":\"a\",\"path\":\"$\",\"status\":\"translated\"}}\n\"A\" -> \"甲\"\n",
+            serde_json::to_string(&missing).unwrap()
+        );
+        assert!(parse(&missing_content).unwrap_err().contains("provider"));
+
+        let unknown_meta = missing_content.replace(
+            &serde_json::to_string(&missing).unwrap(),
+            &format!(
+                "{{\"future\":true,{}}}",
+                &serde_json::to_string(&document().meta).unwrap()[1..]
+            ),
+        );
+        assert!(parse(&unknown_meta).unwrap_err().contains("future"));
+
+        let unknown_location = format!(
+            "{HEADER}\n# meta {}\n@ {{\"file\":\"lang/en_us.snbt\",\"entry_id\":\"a\",\"path\":\"$\",\"status\":\"translated\",\"future\":true}}\n\"A\" -> \"甲\"\n",
+            serde_json::to_string(&document().meta).unwrap()
+        );
+        assert!(parse(&unknown_location).unwrap_err().contains("future"));
+
+        let missing_location = format!(
+            "{HEADER}\n# meta {}\n@ {{\"file\":\"lang/en_us.snbt\",\"entry_id\":\"a\",\"status\":\"translated\"}}\n\"A\" -> \"甲\"\n",
+            serde_json::to_string(&document().meta).unwrap()
+        );
+        assert!(parse(&missing_location).unwrap_err().contains("path"));
+    }
+
+    #[test]
+    fn rejects_location_that_does_not_match_file_group() {
+        let content = format!(
+            "{HEADER}\n# meta {}\n## file \"chapters/a.snbt\"\n@ {{\"file\":\"chapters/b.snbt\",\"entry_id\":\"b:0:title\",\"path\":\"$\",\"status\":\"translated\"}}\n\"B\" -> \"乙\"\n",
+            serde_json::to_string(&document().meta).unwrap()
+        );
+        assert!(parse(&content).unwrap_err().contains("## file"));
     }
 }
