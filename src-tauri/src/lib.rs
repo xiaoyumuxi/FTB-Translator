@@ -1,14 +1,17 @@
 mod chapters;
 mod cmp;
+mod commands;
 mod core;
 mod error;
 mod glossary;
 mod logging;
+mod protocol;
 mod providers;
 mod rich_text;
 mod snbt;
 mod storage;
 
+use error::AppError;
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use storage::History;
@@ -29,7 +32,6 @@ fn bridge(app: tauri::AppHandle, command: String, payload: Option<Value>) -> Res
         json!({"command":command}),
     );
     let result = match command.as_str() {
-        "scan" => core::scan(&v),
         "settings" => serde_json::to_value(storage::load_settings(&dir)).map_err(|e| e.to_string()),
         "save-settings" => storage::save_settings(&dir, &v),
         "default-glossary" => {
@@ -80,9 +82,6 @@ fn bridge(app: tauri::AppHandle, command: String, payload: Option<Value>) -> Res
             );
             Ok(json!({"path":path}))
         }
-        "cmp-apply" => core::apply_cmp(&dir, &v),
-        "cmp-review" => core::review_cmp(&v),
-        "cmp-save-edits" => core::save_cmp_edits(&v),
         "cmp-export" => core::export_cmp(&v),
         "cmp-open" => core::open_cmp(&v),
         _ => Err(format!("未知命令：{command}")),
@@ -99,14 +98,25 @@ fn bridge(app: tauri::AppHandle, command: String, payload: Option<Value>) -> Res
 }
 
 #[tauri::command]
-fn start_translation(app: tauri::AppHandle, mut payload: Value) -> Result<(), String> {
-    let dir = data_dir(&app)?;
+fn scan(request: commands::ScanRequest) -> Result<commands::ScanResponse, AppError> {
+    commands::scan(request)
+}
+
+#[tauri::command]
+fn translate(
+    app: tauri::AppHandle,
+    request: commands::TranslateRequest,
+) -> Result<commands::TranslateResponse, AppError> {
+    let dir = data_dir(&app).map_err(commands::invalid_input)?;
+    let mut payload = serde_json::to_value(request)
+        .map_err(|error| commands::invalid_input(error.to_string()))?;
     let task_app = app.clone();
     let task_id = if let Some(path) = payload["retry_cmp_path"]
         .as_str()
         .filter(|path| !path.trim().is_empty())
     {
-        let document = cmp::load(std::path::Path::new(path))?;
+        let document = cmp::load(std::path::Path::new(path))
+            .map_err(|message| AppError::cmp_invalid(message.clone(), message))?;
         if document.meta.task_id.trim().is_empty() {
             logging::task_id()
         } else {
@@ -116,6 +126,7 @@ fn start_translation(app: tauri::AppHandle, mut payload: Value) -> Result<(), St
         logging::task_id()
     };
     payload["_task_id"] = json!(task_id);
+    let response_task_id = task_id.clone();
     tauri::async_runtime::spawn(async move {
         if let Err(e) = core::translate(task_app.clone(), dir, payload).await {
             logging::error(
@@ -130,14 +141,53 @@ fn start_translation(app: tauri::AppHandle, mut payload: Value) -> Result<(), St
             );
         }
     });
-    Ok(())
+    Ok(commands::TranslateResponse {
+        accepted: true,
+        task_id: response_task_id,
+    })
+}
+
+#[tauri::command]
+fn load_cmp(request: commands::LoadCmpRequest) -> Result<commands::LoadCmpResponse, AppError> {
+    commands::load_cmp(request)
+}
+
+#[tauri::command]
+fn save_cmp_targets(
+    request: commands::SaveCmpTargetsRequest,
+) -> Result<commands::SaveCmpTargetsResponse, AppError> {
+    commands::save_cmp_targets(request)
+}
+
+#[tauri::command]
+fn validate_cmp(
+    request: commands::CmpScopeRequest,
+) -> Result<commands::ValidateCmpResponse, AppError> {
+    commands::validate_cmp(request)
+}
+
+#[tauri::command]
+fn apply_cmp(
+    app: tauri::AppHandle,
+    request: commands::CmpScopeRequest,
+) -> Result<commands::ApplyCmpResponse, AppError> {
+    let dir = data_dir(&app).map_err(commands::invalid_input)?;
+    commands::apply_cmp(&dir, request)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![bridge, start_translation])
+        .invoke_handler(tauri::generate_handler![
+            bridge,
+            scan,
+            translate,
+            load_cmp,
+            save_cmp_targets,
+            validate_cmp,
+            apply_cmp
+        ])
         .setup(|app| {
             let dir = data_dir(app.handle()).map_err(std::io::Error::other)?;
             let settings = storage::load_settings(&dir);

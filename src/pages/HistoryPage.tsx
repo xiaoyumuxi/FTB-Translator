@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { Archive, Check, CircleAlert, FileSearch, History, Trash2 } from "lucide-react";
 import type { Run } from "../models/translation";
-import { call, frontendLog } from "../services/tauri";
+import { call, errorText, frontendLog } from "../services/tauri";
 
 export function HistoryPage({
   runs,
@@ -30,7 +30,7 @@ export function HistoryPage({
       reload();
       notify("历史记录已删除");
     } catch (error) {
-      notify(String(error));
+      notify(errorText(error));
     }
   }
 
@@ -49,7 +49,7 @@ export function HistoryPage({
         });
         notify("ZIP 已导出");
       } catch (error) {
-        notify(String(error));
+        notify(errorText(error));
       }
     }
   }

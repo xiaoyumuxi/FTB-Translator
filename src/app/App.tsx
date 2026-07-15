@@ -24,7 +24,17 @@ import {
 import { HistoryPage } from "../pages/HistoryPage";
 import { SettingsPage } from "../pages/SettingsPage";
 import { WorkbenchPage } from "../pages/WorkbenchPage";
-import { call, errorText, frontendLog, startTranslation } from "../services/tauri";
+import {
+  applyCmp as applyCmpCommand,
+  call,
+  errorText,
+  frontendLog,
+  loadCmp,
+  saveCmpTargets,
+  scanTask,
+  translateTask,
+  validateCmp,
+} from "../services/tauri";
 
 export function App() {
   const [view, setView] = useState<View>("workbench");
@@ -88,7 +98,7 @@ export function App() {
           log_level: value.log_level,
         });
       })
-      .catch((error) => notify(String(error)));
+      .catch((error) => notify(errorText(error)));
   }, []);
 
   useTauriEvents((event) => {
@@ -177,7 +187,7 @@ export function App() {
     setToast(text);
     window.setTimeout(() => setToast(""), 3200);
   };
-  const loadHistory = () => call<Run[]>("history-list").then(setRuns).catch((error) => notify(String(error)));
+  const loadHistory = () => call<Run[]>("history-list").then(setRuns).catch((error) => notify(errorText(error)));
 
   useEffect(() => {
     if (view === "history") loadHistory();
@@ -256,7 +266,7 @@ export function App() {
     setReviewPrompt(false);
     void frontendLog("info", "scan_started", "用户开始扫描任务书", { path });
     try {
-      const result = await call<ScanResult>("scan", { path, batch_size: settings.batch_size });
+      const result = await scanTask({ path, batch_size: settings.batch_size });
       setScan(result);
       setSelectedPath(result.quests_dir);
       setStage("scanned");
@@ -268,7 +278,7 @@ export function App() {
       });
     } catch (error) {
       setStage("error");
-      notify(String(error));
+      notify(errorText(error));
     } finally {
       setBusy(false);
     }
@@ -290,14 +300,14 @@ export function App() {
       provider: settings.provider,
     });
     try {
-      await startTranslation({ quests_dir: scan.quests_dir, ...settings });
+      await translateTask(scan.quests_dir, settings);
     } catch (error) {
       void frontendLog("error", "translation_start_failed", "启动翻译命令失败", {
         error: errorText(error),
       });
       setBusy(false);
       setStage("scanned");
-      notify(String(error));
+      notify(errorText(error));
     }
   }
 
@@ -306,7 +316,7 @@ export function App() {
     const count = cmpEntries.filter((entry) => entry.status === "rate_limited").length;
     if (!count) return notify("当前没有可重试的限流条目");
     try {
-      await call("cmp-save-edits", { cmp_path: cmpDraft.cmp_path, entries: cmpEntries });
+      await saveCmpTargets(cmpDraft.cmp_path, cmpEntries);
       retryingRateLimited.current = true;
       resetProgress(count);
       setBusy(true);
@@ -317,11 +327,7 @@ export function App() {
         cmp_path: cmpDraft.cmp_path,
         count,
       });
-      await startTranslation({
-        quests_dir: scan.quests_dir,
-        retry_cmp_path: cmpDraft.cmp_path,
-        ...settings,
-      });
+      await translateTask(scan.quests_dir, settings, cmpDraft.cmp_path);
     } catch (error) {
       retryingRateLimited.current = false;
       setBusy(false);
@@ -330,16 +336,16 @@ export function App() {
         task_id: cmpDraft.task_id || "",
         error: errorText(error),
       });
-      notify(String(error));
+      notify(errorText(error));
     }
   }
 
   async function loadCmpEntries(draft: CmpDraft) {
     try {
-      const result = await call<{ entries: CmpEntry[] }>("cmp-review", { cmp_path: draft.cmp_path });
+      const result = await loadCmp(draft.cmp_path);
       setCmpEntries(result.entries);
     } catch (error) {
-      notify(String(error));
+      notify(errorText(error));
     }
   }
 
@@ -356,12 +362,14 @@ export function App() {
     });
     try {
       if (cmpEntries.length) {
-        await call("cmp-save-edits", { cmp_path: cmpDraft.cmp_path, entries: cmpEntries });
+        await saveCmpTargets(cmpDraft.cmp_path, cmpEntries);
       }
-      const result = await call<{ report: Report; run_id: number; task_id: string }>("cmp-apply", {
+      const request = {
         cmp_path: cmpDraft.cmp_path,
         quests_dir: scan.quests_dir,
-      });
+      };
+      await validateCmp(request);
+      const result = await applyCmpCommand(request);
       setBusy(false);
       setProgress(100);
       setStage("done");
@@ -382,7 +390,7 @@ export function App() {
       });
       setBusy(false);
       setStage("review");
-      notify(String(error));
+      notify(errorText(error));
     }
   }
 
@@ -395,7 +403,7 @@ export function App() {
         cmp_path: cmpDraft.cmp_path,
       });
     } catch (error) {
-      notify(String(error));
+      notify(errorText(error));
     }
   }
 
@@ -420,7 +428,7 @@ export function App() {
       });
       notify("CMP 校对文件已导出");
     } catch (error) {
-      notify(String(error));
+      notify(errorText(error));
     }
   }
 
@@ -479,7 +487,7 @@ export function App() {
       });
       notify("设置已保存");
     } catch (error) {
-      notify(String(error));
+      notify(errorText(error));
     }
   }
 

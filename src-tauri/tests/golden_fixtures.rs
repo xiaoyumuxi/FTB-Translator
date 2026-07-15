@@ -10,6 +10,8 @@ mod error;
 mod glossary;
 #[path = "../src/logging.rs"]
 mod logging;
+#[path = "../src/protocol.rs"]
+mod protocol;
 #[path = "../src/providers.rs"]
 mod providers;
 #[path = "../src/rich_text.rs"]

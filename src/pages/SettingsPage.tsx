@@ -21,7 +21,7 @@ import {
   type Provider,
   type SettingsData,
 } from "../models/settings";
-import { call, frontendLog } from "../services/tauri";
+import { call, errorText, frontendLog } from "../services/tauri";
 
 export function SettingsPage({
   value,
@@ -46,7 +46,7 @@ export function SettingsPage({
   useEffect(() => {
     call<{ directory: string; backend: string; frontend: string }>("logs-info")
       .then((result) => setLogDirectory(`${result.directory} · ${result.backend} / ${result.frontend}`))
-      .catch((error) => setLogDirectory(String(error)));
+      .catch((error) => setLogDirectory(errorText(error)));
   }, []);
 
   async function toggleCredential() {
@@ -76,7 +76,7 @@ export function SettingsPage({
         has_api_key: saved.has_api_key,
       });
     } catch (error) {
-      setCredentialStatus(String(error));
+      setCredentialStatus(errorText(error));
     }
   }
 
@@ -110,7 +110,7 @@ export function SettingsPage({
       void frontendLog("info", "logs_opened", "用户打开了日志目录");
       notify("已打开日志目录");
     } catch (error) {
-      notify(String(error));
+      notify(errorText(error));
     }
   }
 
@@ -126,7 +126,7 @@ export function SettingsPage({
       void frontendLog("info", "logs_exported", "用户导出了前后端诊断日志", { path: target });
       notify("诊断日志已导出");
     } catch (error) {
-      notify(String(error));
+      notify(errorText(error));
     }
   }
 

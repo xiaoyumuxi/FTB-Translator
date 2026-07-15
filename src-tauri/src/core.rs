@@ -1,4 +1,5 @@
 use crate as crate_root;
+use crate::protocol::CmpTargetEdit;
 use crate::{
     chapters, cmp,
     error::{AppError, AppResult, ErrorCode},
@@ -1258,8 +1259,17 @@ pub async fn translate(app: AppHandle, data_dir: PathBuf, payload: Value) -> Res
     Ok(())
 }
 
+#[cfg(test)]
 pub fn apply_cmp(data_dir: &Path, payload: &Value) -> Result<Value, String> {
-    let cmp_path = PathBuf::from(payload["cmp_path"].as_str().ok_or("缺少 CMP 文件路径")?);
+    apply_cmp_result(data_dir, payload).map_err(String::from)
+}
+
+pub fn apply_cmp_result(data_dir: &Path, payload: &Value) -> AppResult<Value> {
+    let cmp_path = PathBuf::from(
+        payload["cmp_path"]
+            .as_str()
+            .ok_or_else(|| AppError::invalid_input("缺少 CMP 文件路径", "cmp_path is missing"))?,
+    );
     let operation_id = logging::task_id();
     let document = match cmp::load(&cmp_path) {
         Ok(document) => document,
@@ -1270,7 +1280,7 @@ pub fn apply_cmp(data_dir: &Path, payload: &Value) -> Result<Value, String> {
                 "CMP 校对文件读取或解析失败",
                 json!({"task_id":operation_id,"cmp_path":cmp_path,"error":error}),
             );
-            return Err(error.into());
+            return Err(AppError::cmp_invalid(error.clone(), error));
         }
     };
     let task_id = if document.meta.task_id.trim().is_empty() {
@@ -1292,12 +1302,13 @@ pub fn apply_cmp(data_dir: &Path, payload: &Value) -> Result<Value, String> {
     );
     let phase = std::cell::Cell::new("validation");
     let result = apply_cmp_inner(
-        data_dir,
+        Some(data_dir),
         payload,
         cmp_path.clone(),
         document,
         &task_id,
         &phase,
+        false,
     );
     if let Err(error) = &result {
         logging::warn(
@@ -1307,16 +1318,34 @@ pub fn apply_cmp(data_dir: &Path, payload: &Value) -> Result<Value, String> {
             json!({"task_id":task_id,"cmp_path":cmp_path,"phase":phase.get(),"error":error}),
         );
     }
-    result.map_err(String::from)
+    result
+}
+
+pub fn validate_cmp(payload: &Value) -> AppResult<Value> {
+    let cmp_path = PathBuf::from(
+        payload["cmp_path"]
+            .as_str()
+            .ok_or_else(|| AppError::invalid_input("缺少 CMP 文件路径", "cmp_path is missing"))?,
+    );
+    let document =
+        cmp::load(&cmp_path).map_err(|message| AppError::cmp_invalid(message.clone(), message))?;
+    let task_id = if document.meta.task_id.trim().is_empty() {
+        logging::task_id()
+    } else {
+        document.meta.task_id.clone()
+    };
+    let phase = std::cell::Cell::new("validation");
+    apply_cmp_inner(None, payload, cmp_path, document, &task_id, &phase, true)
 }
 
 fn apply_cmp_inner(
-    data_dir: &Path,
+    data_dir: Option<&Path>,
     payload: &Value,
     cmp_path: PathBuf,
     document: cmp::Document,
     task_id: &str,
     phase: &std::cell::Cell<&str>,
+    validate_only: bool,
 ) -> AppResult<Value> {
     let selected = Path::new(payload["quests_dir"].as_str().ok_or_else(|| {
         AppError::invalid_input(
@@ -1546,6 +1575,9 @@ fn apply_cmp_inner(
             "output_files":pending_outputs.len()
         }),
     );
+    if validate_only {
+        return Ok(json!({"valid":true}));
+    }
     phase.set("backup");
     logging::info(
         "translation",
@@ -1616,6 +1648,7 @@ fn apply_cmp_inner(
     };
     let report_value = serde_json::to_value(&report)
         .map_err(|error| AppError::commit_failed(error.to_string(), error.to_string(), true))?;
+    let data_dir = data_dir.expect("apply mode always provides an application data directory");
     let history_result = match History::new(data_dir) {
         Ok(history) => history
             .insert(&q, m, &settings, &report_value, &outputs)
@@ -1681,8 +1714,12 @@ pub fn export_cmp(payload: &Value) -> Result<Value, String> {
     Ok(json!({"path":target}))
 }
 
-pub fn review_cmp(payload: &Value) -> Result<Value, String> {
-    let path = Path::new(payload["cmp_path"].as_str().ok_or("缺少 CMP 文件路径")?);
+pub fn review_cmp_result(payload: &Value) -> AppResult<Value> {
+    let path = Path::new(
+        payload["cmp_path"]
+            .as_str()
+            .ok_or_else(|| AppError::invalid_input("缺少 CMP 文件路径", "cmp_path is missing"))?,
+    );
     let document = cmp::load(path)?;
     Ok(json!({
         "entries": document.records.iter().enumerate().map(|(index, record)| json!({
@@ -1697,28 +1734,34 @@ pub fn review_cmp(payload: &Value) -> Result<Value, String> {
     }))
 }
 
-pub fn save_cmp_edits(payload: &Value) -> Result<Value, String> {
-    let path = Path::new(payload["cmp_path"].as_str().ok_or("缺少 CMP 文件路径")?);
-    let edits = payload["entries"]
-        .as_array()
-        .ok_or("缺少 CMP 校对表格内容")?;
+pub fn save_cmp_targets(path: &str, edits: &[CmpTargetEdit]) -> AppResult<Value> {
+    let path = Path::new(path);
     let mut document = cmp::load(path)?;
     if edits.len() != document.records.len() {
-        return Err("CMP 校对表格条目数已变化，请重新打开校对表格".into());
+        return Err(AppError::cmp_invalid(
+            "CMP 校对表格条目数已变化，请重新打开校对表格",
+            format!(
+                "submitted edits={} cmp records={}",
+                edits.len(),
+                document.records.len()
+            ),
+        ));
     }
-    for (index, (record, edit)) in document.records.iter_mut().zip(edits).enumerate() {
-        if edit["index"].as_u64() != Some(index as u64)
-            || edit["entry_id"].as_str() != Some(record.entry_id.as_str())
-            || edit["path"].as_str() != Some(record.path.as_str())
-            || edit["source"].as_str() != Some(record.source.as_str())
-        {
-            return Err("CMP 校对表格内容已过期或不属于当前文件，请重新打开".into());
+    for (expected_index, edit) in edits.iter().enumerate() {
+        if edit.index != expected_index {
+            return Err(AppError::cmp_invalid(
+                "CMP 校对表格内容已过期或不属于当前文件，请重新打开",
+                format!(
+                    "submitted index={} expected index={expected_index}",
+                    edit.index
+                ),
+            ));
         }
-        let target = edit["target"].as_str().ok_or("校对译文必须是文本")?;
-        if target.trim().is_empty() {
-            return Err(format!("第 {} 条译文不能为空", index + 1));
+        if edit.target.trim().is_empty() {
+            let message = format!("第 {} 条译文不能为空", expected_index + 1);
+            return Err(AppError::cmp_invalid(message.clone(), message));
         }
-        record.target = target.to_string();
+        document.records[edit.index].target.clone_from(&edit.target);
     }
     cmp::write(path, &document)?;
     logging::info(
@@ -2013,6 +2056,53 @@ mod tests {
     }
 
     #[test]
+    fn typed_cmp_target_edits_preserve_identity_and_cannot_bypass_validation() {
+        let directory = tempdir().unwrap();
+        let quests = directory.path().join("config/ftbquests/quests");
+        fs::create_dir_all(quests.join("lang")).unwrap();
+        fs::write(
+            quests.join("lang/en_us.snbt"),
+            r#"{ title: "Use §aGreen" }"#,
+        )
+        .unwrap();
+        let cmp_path = directory.path().join("review.cmp");
+        write_test_cmp(
+            &cmp_path,
+            &quests,
+            "Use §aGreen",
+            "Use §aGreen",
+            "使用 §a绿色",
+        );
+        let before = cmp::load(&cmp_path).unwrap().records.remove(0);
+
+        save_cmp_targets(
+            cmp_path.to_str().unwrap(),
+            &[CmpTargetEdit {
+                index: 0,
+                target: "错误地删除颜色码".into(),
+            }],
+        )
+        .unwrap();
+
+        let after = cmp::load(&cmp_path).unwrap().records.remove(0);
+        assert_eq!(after.file, before.file);
+        assert_eq!(after.entry_id, before.entry_id);
+        assert_eq!(after.path, before.path);
+        assert_eq!(after.source, before.source);
+        assert_eq!(after.status, before.status);
+        assert_eq!(after.target, "错误地删除颜色码");
+
+        let error = validate_cmp(&json!({
+            "cmp_path": cmp_path,
+            "quests_dir": quests,
+        }))
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::FormatGuardRejected);
+        assert!(!quests.join("lang/zh_cn.snbt").exists());
+        assert!(!quests.join(".ftb-translater/backups").exists());
+    }
+
+    #[test]
     fn history_failure_after_commit_does_not_report_writeback_failure() {
         let directory = tempdir().unwrap();
         let quests = directory.path().join("config/ftbquests/quests");
@@ -2105,12 +2195,13 @@ mod tests {
         let document = cmp::load(&cmp_path).unwrap();
         let phase = std::cell::Cell::new("validation");
         let error = apply_cmp_inner(
-            &directory.path().join("app-data"),
+            Some(&directory.path().join("app-data")),
             &json!({"cmp_path":cmp_path,"quests_dir":quests.display().to_string()}),
             cmp_path,
             document,
             "test-task",
             &phase,
+            false,
         )
         .unwrap_err();
 
