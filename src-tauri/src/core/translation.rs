@@ -559,7 +559,10 @@ pub async fn translate(app: AppHandle, data_dir: PathBuf, payload: Value) -> Res
             records,
         },
     )?;
-    app.emit(
+    crate_root::task_state::TaskStateStore::new(&data_dir)
+        .and_then(|store| store.translation_succeeded(&task_id))
+        .map_err(String::from)?;
+    if let Err(error) = app.emit(
         "translation-event",
         json!({
             "type":"review_ready",
@@ -569,8 +572,14 @@ pub async fn translate(app: AppHandle, data_dir: PathBuf, payload: Value) -> Res
             "warning_count":warns.len(),
             "failed_count":failed_entries.len()
         }),
-    )
-    .map_err(|e| e.to_string())?;
+    ) {
+        logging::warn(
+            "translation",
+            "review_ready_event_failed",
+            "CMP 已生成，但无法向界面发送完成事件",
+            json!({"task_id":task_id,"cmp_path":cmp_path,"error":error.to_string()}),
+        );
+    }
     logging::info(
         "translation",
         "review_ready",

@@ -3,7 +3,7 @@ import { CircleAlert, Download, FileCheck2, FileText, ShieldCheck, Upload } from
 import type { CmpDraft, CmpEntry, CmpValidationReport } from "../models/cmp";
 
 export function CmpTable({
-  draft: _draft,
+  draft,
   entries,
   setEntries,
   validation,
@@ -106,7 +106,7 @@ export function CmpTable({
         <button className="secondary" disabled={validating} onClick={onValidate}>
           <FileCheck2 />{validating ? "正在验证" : "验证 CMP"}
         </button>
-        <button className="primary" onClick={onApply}>
+        <button className="primary" disabled={draft.can_apply === false} onClick={onApply}>
           <ShieldCheck />确认并覆盖
         </button>
       </div>

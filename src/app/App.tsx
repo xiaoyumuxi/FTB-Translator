@@ -347,6 +347,20 @@ export function App() {
     try {
       const result = await loadCmp(draft.cmp_path);
       setCmpEntries(result.entries);
+      setCmpDraft((current) =>
+        current && current.cmp_path === draft.cmp_path
+          ? {
+              ...current,
+              task_id: result.task_id,
+              task_state: result.task_state,
+              can_apply: result.can_apply,
+            }
+          : current,
+      );
+      if (result.task_state === "applied") {
+        setLogs((value) => [...value, note("该 CMP 已经应用，后端将阻止重复写回。")]);
+        notify("该 CMP 已经应用，不能再次写回");
+      }
     } catch (error) {
       notify(errorText(error));
     }
@@ -354,6 +368,11 @@ export function App() {
 
   async function applyCmp() {
     if (!scan || !cmpDraft) return;
+    if (cmpDraft.can_apply === false) {
+      return notify(
+        cmpDraft.task_state === "applied" ? "该 CMP 已经应用，不能再次写回" : "当前任务状态不允许应用 CMP",
+      );
+    }
     setReviewPrompt(false);
     setBusy(true);
     setStage("running");
@@ -376,6 +395,11 @@ export function App() {
         throw new Error(validation.blocking_issues[0] || "CMP 存在阻断问题");
       }
       const result = await applyCmpCommand(request);
+      setCmpDraft((current) =>
+        current
+          ? { ...current, task_id: result.task_id, task_state: "applied", can_apply: false }
+          : current,
+      );
       setBusy(false);
       setProgress(100);
       setStage("done");
@@ -485,7 +509,13 @@ export function App() {
       return;
     }
     const draft = cmpDraft
-      ? { ...cmpDraft, cmp_path: value, task_id: undefined }
+      ? {
+          ...cmpDraft,
+          cmp_path: value,
+          task_id: undefined,
+          task_state: undefined,
+          can_apply: undefined,
+        }
       : {
           cmp_path: value,
           total_entries: scan?.entry_count || 0,

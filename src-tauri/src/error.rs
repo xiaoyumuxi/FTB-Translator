@@ -16,6 +16,8 @@ pub enum ErrorCode {
     BackupFailed,
     CommitFailed,
     HistorySaveFailed,
+    TaskStateConflict,
+    TaskStateSaveFailed,
 }
 
 impl ErrorCode {
@@ -31,6 +33,8 @@ impl ErrorCode {
             Self::BackupFailed => "backup_failed",
             Self::CommitFailed => "commit_failed",
             Self::HistorySaveFailed => "history_save_failed",
+            Self::TaskStateConflict => "task_state_conflict",
+            Self::TaskStateSaveFailed => "task_state_save_failed",
         }
     }
 }
@@ -184,6 +188,33 @@ impl AppError {
             task_book_modified,
         )
     }
+
+    pub fn task_state_conflict(
+        user_message: impl Into<String>,
+        internal_message: impl Into<String>,
+    ) -> Self {
+        Self::new(
+            ErrorCode::TaskStateConflict,
+            user_message,
+            internal_message,
+            false,
+            false,
+        )
+    }
+
+    pub fn task_state_save_failed(
+        user_message: impl Into<String>,
+        internal_message: impl Into<String>,
+        task_book_modified: bool,
+    ) -> Self {
+        Self::new(
+            ErrorCode::TaskStateSaveFailed,
+            user_message,
+            internal_message,
+            false,
+            task_book_modified,
+        )
+    }
 }
 
 impl fmt::Display for AppError {
@@ -239,5 +270,15 @@ mod tests {
         assert_eq!(history.code, ErrorCode::HistorySaveFailed);
         assert!(history.retryable);
         assert!(history.task_book_modified);
+
+        let conflict = AppError::task_state_conflict("任务已运行", "state=translating");
+        assert_eq!(conflict.code, ErrorCode::TaskStateConflict);
+        assert!(!conflict.retryable);
+        assert!(!conflict.task_book_modified);
+
+        let state_save = AppError::task_state_save_failed("状态保存失败", "disk full", true);
+        assert_eq!(state_save.code, ErrorCode::TaskStateSaveFailed);
+        assert!(!state_save.retryable);
+        assert!(state_save.task_book_modified);
     }
 }

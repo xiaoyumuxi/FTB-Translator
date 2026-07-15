@@ -20,6 +20,8 @@ mod rich_text;
 mod snbt;
 #[path = "../src/storage.rs"]
 mod storage;
+#[path = "../src/task_state.rs"]
+mod task_state;
 
 // Compile the production façade and its path-based child modules so the offline
 // golden pipeline always exercises the real scan/protection/review/writeback code.

@@ -20,6 +20,7 @@ React 界面（src/main.tsx）
         ├── 翻译提供商（providers.rs）
         ├── 本地词表（glossary.rs）
         ├── 设置、钥匙串与历史（storage.rs）
+        ├── 持久任务状态（task_state.rs）
         └── 诊断日志（logging.rs）
 ```
 
@@ -44,9 +45,11 @@ React 界面（src/main.tsx）
 
 “直接覆盖”和“人工校对”只是在 UI 中到达应用阶段的方式不同，后端最终都调用相同的 CMP 应用路径。详细流程分别见 [翻译流水线](translation-pipeline.md) 与 [写回事务](writeback-transaction.md)。
 
+后端另以 `created → translating → review_ready → applying → applied` 表示成功路径，操作失败进入 `failed`；未修改任务书的 apply 失败恢复为 `review_ready`。命令在启动异步任务或写回前先原子转换状态，不能只依赖前端按钮防止重复操作。
+
 ## 持久化边界
 
-系统应用数据目录保存普通设置、可编辑默认词表和 `history.sqlite3`。API Key 按提供商保存在系统凭证管理器，只在用户明确查看/修改或 API 模式实际翻译时读取，并在会话中缓存。
+系统应用数据目录保存普通设置、可编辑默认词表、`history.sqlite3` 和 `task-state.sqlite3`。任务状态库只保存任务身份、规范化任务书路径和状态；SQLite 事务与进程内互斥共同保护转换，重启后仍能拒绝再次应用已完成 CMP。API Key 按提供商保存在系统凭证管理器，只在用户明确查看/修改或 API 模式实际翻译时读取，并在会话中缓存。
 
 每个任务书自己的工作数据位于 `<quests>/.ftb-translater/`：
 
@@ -72,6 +75,7 @@ React 界面（src/main.tsx）
 4. 校验失败发生在备份和提交之前；多文件提交失败必须尝试回滚。
 5. 写回成功后的缓存、历史或报告保存失败是非破坏性告警，不能误报为任务书提交失败。
 6. 相同输入的文件排序、条目顺序、CMP 分组和指纹计算必须确定。
+7. `translating`、`applying` 和 `applied` 的重复命令必须由后端拒绝；导入 CMP 不得覆盖已有 `applied` 状态。
 
 ## 已知边界与演进方向
 

@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { CmpEntry, CmpValidationReport } from "../models/cmp";
+import type { CmpEntry, CmpValidationReport, TaskState } from "../models/cmp";
 import type { LogLevel, SettingsData } from "../models/settings";
 import type { Report, ScanResult } from "../models/translation";
 
@@ -77,7 +77,12 @@ export function translateTask(
 }
 
 export function loadCmp(cmpPath: string) {
-  return typedCall<{ entries: CmpEntry[] }>("load_cmp", { cmp_path: cmpPath });
+  return typedCall<{
+    entries: CmpEntry[];
+    task_id: string;
+    task_state: TaskState;
+    can_apply: boolean;
+  }>("load_cmp", { cmp_path: cmpPath });
 }
 
 export function saveCmpTargets(cmpPath: string, entries: CmpEntry[]) {

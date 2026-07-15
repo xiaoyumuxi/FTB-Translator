@@ -1,9 +1,19 @@
+export type TaskState =
+  | "created"
+  | "translating"
+  | "review_ready"
+  | "applying"
+  | "applied"
+  | "failed";
+
 export type CmpDraft = {
   cmp_path: string;
   task_id?: string;
   total_entries: number;
   warning_count: number;
   failed_count: number;
+  task_state?: TaskState;
+  can_apply?: boolean;
 };
 
 export type CmpEntry = {

@@ -175,13 +175,21 @@ export function WorkbenchPage(props: WorkbenchPageProps) {
             />
           ) : props.stage === "review" ? (
             <>
-              <h2>等待人工确认</h2>
-              <p>可以编辑 CMP 右侧中文，完成后再应用并覆盖任务书。</p>
-              <div className="result-mini amber">
+              <h2>{props.cmpDraft?.task_state === "applied" ? "CMP 已经应用" : "等待人工确认"}</h2>
+              <p>
+                {props.cmpDraft?.task_state === "applied"
+                  ? "状态库已记录本次写回，后端会阻止重复应用。"
+                  : "可以编辑 CMP 右侧中文，完成后再应用并覆盖任务书。"}
+              </p>
+              <div className={props.cmpDraft?.task_state === "applied" ? "result-mini" : "result-mini amber"}>
                 <FileText />
-                <span>CMP 尚未写回</span>
+                <span>{props.cmpDraft?.task_state === "applied" ? "CMP 已写回" : "CMP 尚未写回"}</span>
               </div>
-              <button className="primary wide" onClick={props.onApplyCmp}>
+              <button
+                className="primary wide"
+                disabled={props.cmpDraft?.can_apply === false}
+                onClick={props.onApplyCmp}
+              >
                 <ShieldCheck />校验并覆盖
               </button>
             </>

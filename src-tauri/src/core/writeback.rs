@@ -464,7 +464,12 @@ pub fn apply_cmp_result(data_dir: &Path, payload: &Value) -> AppResult<Value> {
             return Err(AppError::cmp_invalid(error.clone(), error));
         }
     };
-    let task_id = if document.meta.task_id.trim().is_empty() {
+    let task_id = if let Some(task_id) = payload["_task_id"]
+        .as_str()
+        .filter(|task_id| !task_id.trim().is_empty())
+    {
+        task_id.to_string()
+    } else if document.meta.task_id.trim().is_empty() {
         operation_id
     } else {
         document.meta.task_id.clone()

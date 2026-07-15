@@ -10,6 +10,7 @@ mod providers;
 mod rich_text;
 mod snbt;
 mod storage;
+mod task_state;
 
 use error::AppError;
 use serde_json::{json, Value};
@@ -111,24 +112,35 @@ fn translate(
     let mut payload = serde_json::to_value(request)
         .map_err(|error| commands::invalid_input(error.to_string()))?;
     let task_app = app.clone();
-    let task_id = if let Some(path) = payload["retry_cmp_path"]
+    let store = task_state::TaskStateStore::new(&dir)?;
+    let identity = if let Some(path) = payload["retry_cmp_path"]
         .as_str()
         .filter(|path| !path.trim().is_empty())
     {
         let document = cmp::load(std::path::Path::new(path))
             .map_err(|message| AppError::cmp_invalid(message.clone(), message))?;
-        if document.meta.task_id.trim().is_empty() {
-            logging::task_id()
-        } else {
-            document.meta.task_id
-        }
+        store.reserve_retry_translation(&document)?
     } else {
-        logging::task_id()
+        let quests_dir = std::path::Path::new(
+            payload["quests_dir"]
+                .as_str()
+                .ok_or_else(|| commands::invalid_input("缺少任务书目录"))?,
+        );
+        store.reserve_new_translation(quests_dir, &logging::task_id())?
     };
+    let task_id = identity.task_id.clone();
     payload["_task_id"] = json!(task_id);
     let response_task_id = task_id.clone();
     tauri::async_runtime::spawn(async move {
         if let Err(e) = core::translate(task_app.clone(), dir, payload).await {
+            if let Err(state_error) = store.translation_failed(&identity.id) {
+                logging::error(
+                    "translation",
+                    "task_failure_state_save_failed",
+                    "翻译失败，且任务状态无法更新",
+                    json!({"task_id":task_id,"error":state_error}),
+                );
+            }
             logging::error(
                 "translation",
                 "task_failed",
@@ -148,8 +160,12 @@ fn translate(
 }
 
 #[tauri::command]
-fn load_cmp(request: commands::LoadCmpRequest) -> Result<commands::LoadCmpResponse, AppError> {
-    commands::load_cmp(request)
+fn load_cmp(
+    app: tauri::AppHandle,
+    request: commands::LoadCmpRequest,
+) -> Result<commands::LoadCmpResponse, AppError> {
+    let dir = data_dir(&app).map_err(commands::invalid_input)?;
+    commands::load_cmp(&dir, request)
 }
 
 #[tauri::command]
@@ -161,9 +177,11 @@ fn save_cmp_targets(
 
 #[tauri::command]
 fn validate_cmp(
+    app: tauri::AppHandle,
     request: commands::ValidateCmpRequest,
 ) -> Result<core::CmpValidationReport, AppError> {
-    commands::validate_cmp(request)
+    let dir = data_dir(&app).map_err(commands::invalid_input)?;
+    commands::validate_cmp(&dir, request)
 }
 
 #[tauri::command]
