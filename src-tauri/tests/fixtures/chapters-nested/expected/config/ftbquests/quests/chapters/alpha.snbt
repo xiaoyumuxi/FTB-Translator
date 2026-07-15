@@ -1,0 +1,12 @@
+{
+  id: "alpha",
+  title: "第一章",
+  group: {
+    subtitle: '入门',
+    tasks: [
+      { description: "将 16 minecraft:stone 交给 @p[tag=builder]" },
+      { text: "{\"color\":\"aqua\",\"extra\":[{\"text\":\" 现在\"}],\"text\":\"点击这里\"}" }
+    ]
+  },
+  ignored: "Not a translatable field"
+}

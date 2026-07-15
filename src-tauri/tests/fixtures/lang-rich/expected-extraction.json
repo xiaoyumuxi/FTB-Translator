@@ -1,0 +1,48 @@
+[
+  {
+    "entry_id": "title",
+    "file": "lang/en_us.snbt",
+    "source": "Open the \"Quest Book\"",
+    "untouched": false,
+    "units": [{"path": "$", "source": "Open the \"Quest Book\""}]
+  },
+  {
+    "entry_id": "intro",
+    "file": "lang/en_us.snbt",
+    "source": "Welcome, Adventurer!\nUse &e%s&r at @p[tag=builder] with minecraft:stone",
+    "untouched": false,
+    "units": [{"path": "$", "source": "Welcome, Adventurer!\nUse &e%s&r at @p[tag=builder] with minecraft:stone"}]
+  },
+  {
+    "entry_id": "rich",
+    "file": "lang/en_us.snbt",
+    "source": "{\"text\":\"Open guide\",\"color\":\"gold\",\"extra\":[{\"text\":\" now\",\"bold\":true}],\"hoverEvent\":{\"action\":\"show_text\",\"contents\":{\"text\":\"Read details\"}},\"clickEvent\":{\"action\":\"run_command\",\"value\":\"/say hi\"}}",
+    "untouched": false,
+    "units": [
+      {"path": "/text", "source": "Open guide"},
+      {"path": "/extra/0/text", "source": " now"},
+      {"path": "/hoverEvent/contents/text", "source": "Read details"}
+    ]
+  },
+  {
+    "entry_id": "broken",
+    "file": "lang/en_us.snbt",
+    "source": "{\"text\":\"First\",\"text\":\"Second\"}",
+    "untouched": true,
+    "units": []
+  },
+  {
+    "entry_id": "malformed",
+    "file": "lang/en_us.snbt",
+    "source": "{\"text\":\"Missing brace\"",
+    "untouched": true,
+    "units": []
+  },
+  {
+    "entry_id": "escape",
+    "file": "lang/en_us.snbt",
+    "source": "Quote: \"Hello\"; slash \\; newline\nNext",
+    "untouched": false,
+    "units": [{"path": "$", "source": "Quote: \"Hello\"; slash \\; newline\nNext"}]
+  }
+]

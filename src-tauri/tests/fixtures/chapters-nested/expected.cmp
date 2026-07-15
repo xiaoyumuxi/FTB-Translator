@@ -1,0 +1,37 @@
+# FTB Translater CMP v1
+# 只修改箭头右侧的中文；保留 @ 行、英文原文、引号与 JSON 转义。
+# meta {"version":1,"task_id":"fixture-chapters-nested","quests_dir":"{{QUESTS_DIR}}","mode":"chapters","source_fingerprint":"67782d86d4d2ebcf25768287ae3c2f47c5558ea46c826f1e55eb855b5f3777a1","provider":"fixture_mock","base_url":"mock://offline","model":"deterministic-v1","style":"fixture","glossary_enabled":false,"glossary_fingerprint":"","total_entries":8,"cache_hits":0}
+
+## file "chapters/alpha.snbt"
+
+@ {"file":"chapters/alpha.snbt","entry_id":"alpha.snbt:0:title","path":"$","status":"translated"}
+"First Chapter" -> "第一章"
+
+@ {"file":"chapters/alpha.snbt","entry_id":"alpha.snbt:1:subtitle","path":"$","status":"translated"}
+"Getting Started" -> "入门"
+
+@ {"file":"chapters/alpha.snbt","entry_id":"alpha.snbt:2:description","path":"$","status":"translated"}
+"Give 16 minecraft:stone to @p[tag=builder]" -> "将 16 minecraft:stone 交给 @p[tag=builder]"
+
+@ {"file":"chapters/alpha.snbt","entry_id":"alpha.snbt:3:text","path":"/text","status":"translated"}
+"Click here" -> "点击这里"
+
+@ {"file":"chapters/alpha.snbt","entry_id":"alpha.snbt:3:text","path":"/extra/0/text","status":"translated"}
+" now" -> " 现在"
+
+## file "chapters/beta.snbt"
+
+@ {"file":"chapters/beta.snbt","entry_id":"beta.snbt:0:name","path":"$","status":"translated"}
+"Automation" -> "自动化"
+
+@ {"file":"chapters/beta.snbt","entry_id":"beta.snbt:1:description","path":"$","status":"translated"}
+"Use &6Mekanism&r" -> "使用 &6Mekanism&r"
+
+@ {"file":"chapters/beta.snbt","entry_id":"beta.snbt:2:description","path":"$","status":"translated"}
+"Path: C:\\mods\\pack and quote \"ok\"" -> "路径：C:\\mods\\pack，引号 \"好\""
+
+@ {"file":"chapters/beta.snbt","entry_id":"beta.snbt:3:text","path":"/text","status":"translated"}
+"Press -> button" -> "按下 -> 按钮"
+
+@ {"file":"chapters/beta.snbt","entry_id":"beta.snbt:3:text","path":"/hoverEvent/contents","status":"translated"}
+"More info" -> "更多信息"

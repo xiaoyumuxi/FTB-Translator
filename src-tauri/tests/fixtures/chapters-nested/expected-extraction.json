@@ -1,0 +1,64 @@
+[
+  {
+    "entry_id": "alpha.snbt:0:title",
+    "file": "chapters/alpha.snbt",
+    "source": "First Chapter",
+    "untouched": false,
+    "units": [{"path": "$", "source": "First Chapter"}]
+  },
+  {
+    "entry_id": "alpha.snbt:1:subtitle",
+    "file": "chapters/alpha.snbt",
+    "source": "Getting Started",
+    "untouched": false,
+    "units": [{"path": "$", "source": "Getting Started"}]
+  },
+  {
+    "entry_id": "alpha.snbt:2:description",
+    "file": "chapters/alpha.snbt",
+    "source": "Give 16 minecraft:stone to @p[tag=builder]",
+    "untouched": false,
+    "units": [{"path": "$", "source": "Give 16 minecraft:stone to @p[tag=builder]"}]
+  },
+  {
+    "entry_id": "alpha.snbt:3:text",
+    "file": "chapters/alpha.snbt",
+    "source": "{\"text\":\"Click here\",\"color\":\"aqua\",\"extra\":[{\"text\":\" now\"}]}",
+    "untouched": false,
+    "units": [
+      {"path": "/text", "source": "Click here"},
+      {"path": "/extra/0/text", "source": " now"}
+    ]
+  },
+  {
+    "entry_id": "beta.snbt:0:name",
+    "file": "chapters/beta.snbt",
+    "source": "Automation",
+    "untouched": false,
+    "units": [{"path": "$", "source": "Automation"}]
+  },
+  {
+    "entry_id": "beta.snbt:1:description",
+    "file": "chapters/beta.snbt",
+    "source": "Use &6Mekanism&r",
+    "untouched": false,
+    "units": [{"path": "$", "source": "Use &6Mekanism&r"}]
+  },
+  {
+    "entry_id": "beta.snbt:2:description",
+    "file": "chapters/beta.snbt",
+    "source": "Path: C:\\mods\\pack and quote \"ok\"",
+    "untouched": false,
+    "units": [{"path": "$", "source": "Path: C:\\mods\\pack and quote \"ok\""}]
+  },
+  {
+    "entry_id": "beta.snbt:3:text",
+    "file": "chapters/beta.snbt",
+    "source": "{\"text\":\"Press -> button\",\"hoverEvent\":{\"action\":\"show_text\",\"contents\":\"More info\"}}",
+    "untouched": false,
+    "units": [
+      {"path": "/text", "source": "Press -> button"},
+      {"path": "/hoverEvent/contents", "source": "More info"}
+    ]
+  }
+]

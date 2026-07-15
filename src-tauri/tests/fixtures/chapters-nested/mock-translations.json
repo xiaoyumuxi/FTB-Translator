@@ -1,0 +1,12 @@
+[
+  {"entry_id": "alpha.snbt:0:title", "path": "$", "target": "第一章"},
+  {"entry_id": "alpha.snbt:1:subtitle", "path": "$", "target": "入门"},
+  {"entry_id": "alpha.snbt:2:description", "path": "$", "target": "将 16 minecraft:stone 交给 @p[tag=builder]"},
+  {"entry_id": "alpha.snbt:3:text", "path": "/text", "target": "点击这里"},
+  {"entry_id": "alpha.snbt:3:text", "path": "/extra/0/text", "target": " 现在"},
+  {"entry_id": "beta.snbt:0:name", "path": "$", "target": "自动化"},
+  {"entry_id": "beta.snbt:1:description", "path": "$", "target": "使用 &6Mekanism&r"},
+  {"entry_id": "beta.snbt:2:description", "path": "$", "target": "路径：C:\\mods\\pack，引号 \"好\""},
+  {"entry_id": "beta.snbt:3:text", "path": "/text", "target": "按下 -> 按钮"},
+  {"entry_id": "beta.snbt:3:text", "path": "/hoverEvent/contents", "target": "更多信息"}
+]

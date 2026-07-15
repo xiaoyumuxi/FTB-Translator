@@ -1,0 +1,11 @@
+{
+  "title": "打开“任务书”",
+  "intro": [
+    "欢迎，冒险者！",
+    "在 @p[tag=builder] 处对 minecraft:stone 使用 &e%s&r。"
+  ],
+  "rich": "{\"clickEvent\":{\"action\":\"run_command\",\"value\":\"/say hi\"},\"color\":\"gold\",\"extra\":[{\"bold\":true,\"text\":\" 现在\"}],\"hoverEvent\":{\"action\":\"show_text\",\"contents\":{\"text\":\"阅读详情\"}},\"text\":\"打开指南\"}",
+  "broken": "{\"text\":\"First\",\"text\":\"Second\"}",
+  "malformed": "{\"text\":\"Missing brace\"",
+  "escape": "引号：\"你好\"；斜杠 \\；换行\n下一行"
+}

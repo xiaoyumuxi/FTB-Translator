@@ -1,0 +1,11 @@
+{
+  title: "Open the \"Quest Book\"",
+  intro: [
+    "Welcome, Adventurer!",
+    "Use &e%s&r at @p[tag=builder] with minecraft:stone"
+  ],
+  rich: "{\"text\":\"Open guide\",\"color\":\"gold\",\"extra\":[{\"text\":\" now\",\"bold\":true}],\"hoverEvent\":{\"action\":\"show_text\",\"contents\":{\"text\":\"Read details\"}},\"clickEvent\":{\"action\":\"run_command\",\"value\":\"/say hi\"}}",
+  broken: "{\"text\":\"First\",\"text\":\"Second\"}",
+  malformed: "{\"text\":\"Missing brace\"",
+  escape: "Quote: \"Hello\"; slash \\; newline\nNext"
+}

@@ -1,0 +1,23 @@
+# FTB Translater CMP v1
+# 只修改箭头右侧的中文；保留 @ 行、英文原文、引号与 JSON 转义。
+# meta {"version":1,"task_id":"fixture-lang-rich","quests_dir":"{{QUESTS_DIR}}","mode":"lang","source_fingerprint":"42c4e588c6c2984793f36aea4bbbe68b042c85f0de16b37a3e3da640585d00ad","provider":"fixture_mock","base_url":"mock://offline","model":"deterministic-v1","style":"fixture","glossary_enabled":false,"glossary_fingerprint":"","total_entries":6,"cache_hits":0}
+
+## file "lang/en_us.snbt"
+
+@ {"file":"lang/en_us.snbt","entry_id":"title","path":"$","status":"translated"}
+"Open the \"Quest Book\"" -> "打开“任务书”"
+
+@ {"file":"lang/en_us.snbt","entry_id":"intro","path":"$","status":"translated"}
+"Welcome, Adventurer!\nUse &e%s&r at @p[tag=builder] with minecraft:stone" -> "欢迎，冒险者！\n在 @p[tag=builder] 处对 minecraft:stone 使用 &e%s&r。"
+
+@ {"file":"lang/en_us.snbt","entry_id":"rich","path":"/text","status":"translated"}
+"Open guide" -> "打开指南"
+
+@ {"file":"lang/en_us.snbt","entry_id":"rich","path":"/extra/0/text","status":"translated"}
+" now" -> " 现在"
+
+@ {"file":"lang/en_us.snbt","entry_id":"rich","path":"/hoverEvent/contents/text","status":"translated"}
+"Read details" -> "阅读详情"
+
+@ {"file":"lang/en_us.snbt","entry_id":"escape","path":"$","status":"translated"}
+"Quote: \"Hello\"; slash \\; newline\nNext" -> "引号：\"你好\"；斜杠 \\；换行\n下一行"

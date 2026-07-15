@@ -1,0 +1,9 @@
+{
+  id: "beta",
+  name: "Automation",
+  description: [
+    "Use &6Mekanism&r",
+    "Path: C:\\mods\\pack and quote \"ok\""
+  ],
+  text: '{"text":"Press -> button","hoverEvent":{"action":"show_text","contents":"More info"}}'
+}

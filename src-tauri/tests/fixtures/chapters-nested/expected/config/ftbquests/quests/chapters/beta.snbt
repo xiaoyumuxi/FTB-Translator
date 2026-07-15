@@ -1,0 +1,9 @@
+{
+  id: "beta",
+  name: "自动化",
+  description: [
+    "使用 &6Mekanism&r",
+    "路径：C:\\mods\\pack，引号 \"好\""
+  ],
+  text: '{"hoverEvent":{"action":"show_text","contents":"更多信息"},"text":"按下 -> 按钮"}'
+}

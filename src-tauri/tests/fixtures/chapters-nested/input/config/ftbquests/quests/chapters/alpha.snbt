@@ -1,0 +1,12 @@
+{
+  id: "alpha",
+  title: "First Chapter",
+  group: {
+    subtitle: 'Getting Started',
+    tasks: [
+      { description: "Give 16 minecraft:stone to @p[tag=builder]" },
+      { text: "{\"text\":\"Click here\",\"color\":\"aqua\",\"extra\":[{\"text\":\" now\"}]}" }
+    ]
+  },
+  ignored: "Not a translatable field"
+}

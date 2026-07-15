@@ -1,0 +1,8 @@
+[
+  {"entry_id": "title", "path": "$", "target": "打开“任务书”"},
+  {"entry_id": "intro", "path": "$", "target": "欢迎，冒险者！\n在 @p[tag=builder] 处对 minecraft:stone 使用 &e%s&r。"},
+  {"entry_id": "rich", "path": "/text", "target": "打开指南"},
+  {"entry_id": "rich", "path": "/extra/0/text", "target": " 现在"},
+  {"entry_id": "rich", "path": "/hoverEvent/contents/text", "target": "阅读详情"},
+  {"entry_id": "escape", "path": "$", "target": "引号：\"你好\"；斜杠 \\；换行\n下一行"}
+]
