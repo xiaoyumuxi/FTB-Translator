@@ -1,8 +1,9 @@
 use super::{
     cache_key, chapters, cmp, entry_source_file, fs, json, load_cache, logging, mode,
     prepare_entry, render_entry, resolve, save_cache, snbt, source_fingerprint,
-    validate_cmp_identity, warnings, AppError, AppResult, BTreeMap, EntryKind, HashMap, HashSet,
-    History, LangValue, Local, Path, PathBuf, Report, Settings, Value, WalkDir,
+    validate_cmp_identity, warnings, AppError, AppResult, BTreeMap, CmpTargetEdit,
+    CmpValidationReport, Entry, EntryKind, HashMap, HashSet, History, Item, LangValue, Local, Path,
+    PathBuf, Report, Settings, Value, WalkDir,
 };
 
 pub(crate) struct FileOutput {
@@ -185,21 +186,322 @@ pub fn apply_cmp_result(data_dir: &Path, payload: &Value) -> AppResult<Value> {
     result
 }
 
-pub fn validate_cmp(payload: &Value) -> AppResult<Value> {
+struct DryRunSource {
+    entries: Vec<Entry>,
+    items: Vec<Item>,
+    files_to_modify: Vec<String>,
+    layout: DryRunLayout,
+}
+
+enum DryRunLayout {
+    Lang(snbt::LangMap),
+    Chapters(Vec<chapters::Segment>),
+}
+
+fn load_dry_run_source(q: &Path, mode: &str) -> AppResult<DryRunSource> {
+    let mut entries = Vec::new();
+    let mut items = Vec::new();
+    let mut files_to_modify = Vec::new();
+    let layout = if mode == "lang" {
+        let map = snbt::load(&q.join("lang/en_us.snbt")).map_err(|message| {
+            AppError::source_changed(
+                message.clone(),
+                format!("reload source language for CMP validation: {message}"),
+            )
+        })?;
+        for (entry_index, (key, value)) in map.iter().enumerate() {
+            let source = match value {
+                LangValue::Text(value) => value.clone(),
+                LangValue::Lines(values) => values.join("\n"),
+            };
+            let (entry, entry_items) = prepare_entry(key.clone(), source, entry_index, None);
+            entries.push(entry);
+            items.extend(entry_items);
+        }
+        files_to_modify.push("lang/zh_cn.snbt".into());
+        DryRunLayout::Lang(map)
+    } else {
+        let mut entry_index = 0;
+        let mut chapter_segments = Vec::new();
+        for file in chapters::files(q) {
+            let segments = chapters::extract(&file).map_err(|message| {
+                AppError::source_changed(
+                    message.clone(),
+                    format!("reload chapter for CMP validation: {message}"),
+                )
+            })?;
+            if !segments.is_empty() {
+                files_to_modify.push(format!(
+                    "chapters/{}",
+                    file.file_name().unwrap_or_default().to_string_lossy()
+                ));
+            }
+            for segment in segments {
+                let (entry, entry_items) = prepare_entry(
+                    segment.cache_id.clone(),
+                    segment.source.clone(),
+                    entry_index,
+                    None,
+                );
+                entries.push(entry);
+                items.extend(entry_items);
+                chapter_segments.push(segment);
+                entry_index += 1;
+            }
+        }
+        DryRunLayout::Chapters(chapter_segments)
+    };
+    Ok(DryRunSource {
+        entries,
+        items,
+        files_to_modify,
+        layout,
+    })
+}
+
+fn apply_dry_run_edits(document: &mut cmp::Document, edits: &[CmpTargetEdit]) -> AppResult<()> {
+    if edits.is_empty() {
+        return Ok(());
+    }
+    if edits.len() != document.records.len() {
+        return Err(AppError::invalid_input(
+            "校对表格条目数与 CMP 不一致，请重新打开 CMP",
+            format!(
+                "dry-run edits={} cmp records={}",
+                edits.len(),
+                document.records.len()
+            ),
+        ));
+    }
+    for (expected_index, edit) in edits.iter().enumerate() {
+        if edit.index != expected_index {
+            return Err(AppError::invalid_input(
+                "校对表格内容已过期，请重新打开 CMP",
+                format!(
+                    "dry-run edit index={} expected={expected_index}",
+                    edit.index
+                ),
+            ));
+        }
+        document.records[expected_index].target = edit.target.clone();
+    }
+    Ok(())
+}
+
+fn blocked_report(
+    belongs_to_current_task_book: bool,
+    source_fingerprint_matches: bool,
+    blocking_issues: Vec<String>,
+) -> CmpValidationReport {
+    CmpValidationReport {
+        belongs_to_current_task_book,
+        source_fingerprint_matches,
+        applicable_entries: 0,
+        format_guard_failures: 0,
+        unchanged_entries: 0,
+        files_to_modify: Vec::new(),
+        blocking: true,
+        blocking_issues,
+    }
+}
+
+pub fn validate_cmp(payload: &Value, edits: &[CmpTargetEdit]) -> AppResult<CmpValidationReport> {
     let cmp_path = PathBuf::from(
         payload["cmp_path"]
             .as_str()
             .ok_or_else(|| AppError::invalid_input("缺少 CMP 文件路径", "cmp_path is missing"))?,
     );
-    let document =
+    let mut document =
         cmp::load(&cmp_path).map_err(|message| AppError::cmp_invalid(message.clone(), message))?;
-    let task_id = if document.meta.task_id.trim().is_empty() {
-        logging::task_id()
-    } else {
-        document.meta.task_id.clone()
-    };
-    let phase = std::cell::Cell::new("validation");
-    apply_cmp_inner(None, payload, cmp_path, document, &task_id, &phase, true)
+    apply_dry_run_edits(&mut document, edits)?;
+    let selected = Path::new(payload["quests_dir"].as_str().ok_or_else(|| {
+        AppError::invalid_input(
+            "缺少任务书目录",
+            "quests_dir is missing from CMP validation payload",
+        )
+    })?);
+    let q = resolve(selected).map_err(|message| {
+        AppError::invalid_input(message.clone(), format!("resolve task book: {message}"))
+    })?;
+    let current_mode = mode(&q).map_err(|message| {
+        AppError::invalid_input(message.clone(), format!("detect task book mode: {message}"))
+    })?;
+    let source = load_dry_run_source(&q, current_mode)?;
+
+    let identity_error = validate_cmp_identity(&document, &q, current_mode).err();
+    let belongs_to_current_task_book = identity_error.is_none();
+    let source_fingerprint_matches = document.meta.total_entries == source.entries.len()
+        && document.meta.source_fingerprint == source_fingerprint(&source.entries);
+    if !belongs_to_current_task_book || !source_fingerprint_matches {
+        let mut issues = Vec::new();
+        if let Some(error) = identity_error {
+            issues.push(error.user_message);
+        }
+        if !source_fingerprint_matches {
+            issues.push("任务书内容或源指纹在 CMP 生成后发生了变化".into());
+        }
+        return Ok(blocked_report(
+            belongs_to_current_task_book,
+            source_fingerprint_matches,
+            issues,
+        ));
+    }
+
+    let expected = source
+        .items
+        .iter()
+        .map(|item| ((item.entry_id.as_str(), item.path.as_str()), item))
+        .collect::<HashMap<_, _>>();
+    let mut seen = HashSet::new();
+    let mut unit_targets = HashMap::new();
+    let mut structural_issues = Vec::new();
+    if document.records.len() != source.items.len() {
+        structural_issues.push(format!(
+            "CMP 翻译单元数量不一致：CMP 为 {}，当前任务书为 {}",
+            document.records.len(),
+            source.items.len()
+        ));
+    }
+    for record in &document.records {
+        let key = (record.entry_id.as_str(), record.path.as_str());
+        if !seen.insert(key) {
+            structural_issues.push(format!(
+                "CMP 包含重复回填位置：{} {}",
+                record.entry_id, record.path
+            ));
+            continue;
+        }
+        let Some(item) = expected.get(&key) else {
+            structural_issues.push(format!(
+                "CMP 包含未知回填位置：{} {}",
+                record.entry_id, record.path
+            ));
+            continue;
+        };
+        let expected_file = entry_source_file(current_mode, &record.entry_id);
+        if record.file != expected_file {
+            structural_issues.push(format!(
+                "CMP 文件归属被修改：{} 应属于 {}",
+                record.entry_id, expected_file
+            ));
+        }
+        if record.source != item.source {
+            structural_issues.push(format!(
+                "CMP 英文原文被修改：{} {}",
+                record.entry_id, record.path
+            ));
+        }
+        if record.target.trim().is_empty() {
+            structural_issues.push(format!(
+                "CMP 译文不能为空：{} {}",
+                record.entry_id, record.path
+            ));
+        }
+        unit_targets.insert(item.id.clone(), record.target.clone());
+    }
+    for item in &source.items {
+        if !seen.contains(&(item.entry_id.as_str(), item.path.as_str())) {
+            structural_issues.push(format!("CMP 缺少回填位置：{} {}", item.entry_id, item.path));
+        }
+    }
+    if !structural_issues.is_empty() || unit_targets.len() != source.items.len() {
+        return Ok(blocked_report(true, true, structural_issues));
+    }
+
+    let mut format_failure_entries = HashSet::new();
+    let mut blocking_issues = Vec::new();
+    for record in &document.records {
+        let problems = warnings(&record.source, &record.target);
+        if !problems.is_empty() {
+            format_failure_entries.insert(record.entry_id.clone());
+            blocking_issues.push(format!(
+                "{} {}：{}",
+                record.entry_id,
+                record.path,
+                problems.join("；")
+            ));
+        }
+    }
+
+    let mut applicable_entries = 0;
+    let mut unchanged_entries = 0;
+    let mut results = HashMap::new();
+    for entry in &source.entries {
+        let target = match &entry.kind {
+            EntryKind::Untouched(_) => entry.source.clone(),
+            _ => match render_entry(entry, &unit_targets) {
+                Ok(target) => target,
+                Err(message) => {
+                    format_failure_entries.insert(entry.id.clone());
+                    blocking_issues.push(format!("{}：{message}", entry.id));
+                    continue;
+                }
+            },
+        };
+        let problems = warnings(&entry.source, &target);
+        if !problems.is_empty() && format_failure_entries.insert(entry.id.clone()) {
+            blocking_issues.push(format!("{}：{}", entry.id, problems.join("；")));
+        }
+        if target == entry.source {
+            unchanged_entries += 1;
+        }
+        if !format_failure_entries.contains(&entry.id) {
+            applicable_entries += 1;
+        }
+        results.insert(entry.id.clone(), target);
+    }
+
+    let format_guard_failures = format_failure_entries.len();
+    let mut output_issues = Vec::new();
+    if results.len() == source.entries.len() {
+        match source.layout {
+            DryRunLayout::Lang(mut map) => {
+                for (key, value) in &mut map {
+                    if let Some(target) = results.get(key) {
+                        *value = match value {
+                            LangValue::Text(_) => LangValue::Text(target.clone()),
+                            LangValue::Lines(_) => {
+                                LangValue::Lines(target.split('\n').map(str::to_string).collect())
+                            }
+                        };
+                    }
+                }
+                let content = snbt::dump(&map);
+                if let Err(message) = snbt::parse(&content) {
+                    output_issues.push(format!("lang/zh_cn.snbt：{message}"));
+                }
+            }
+            DryRunLayout::Chapters(segments) => {
+                let mut by_file: HashMap<PathBuf, Vec<(usize, String)>> = HashMap::new();
+                for segment in segments {
+                    by_file
+                        .entry(segment.path)
+                        .or_default()
+                        .push((segment.index, results[&segment.cache_id].clone()));
+                }
+                for (file, replacements) in by_file {
+                    if let Err(message) = chapters::render_replacements(&file, &replacements) {
+                        output_issues.push(format!(
+                            "chapters/{}：{message}",
+                            file.file_name().unwrap_or_default().to_string_lossy()
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    blocking_issues.extend(output_issues);
+    let blocking = !blocking_issues.is_empty();
+    Ok(CmpValidationReport {
+        belongs_to_current_task_book: true,
+        source_fingerprint_matches: true,
+        applicable_entries,
+        format_guard_failures,
+        unchanged_entries,
+        files_to_modify: source.files_to_modify,
+        blocking,
+        blocking_issues,
+    })
 }
 
 pub(crate) fn apply_cmp_inner(

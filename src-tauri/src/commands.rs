@@ -94,9 +94,13 @@ pub struct CmpScopeRequest {
     pub quests_dir: String,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-pub struct ValidateCmpResponse {
-    pub valid: bool,
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValidateCmpRequest {
+    pub cmp_path: String,
+    pub quests_dir: String,
+    #[serde(default)]
+    pub edits: Vec<CmpTargetEdit>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -132,12 +136,14 @@ pub fn save_cmp_targets(
     serde_json::from_value(value).map_err(|error| invalid_input(error.to_string()))
 }
 
-pub fn validate_cmp(request: CmpScopeRequest) -> Result<ValidateCmpResponse, AppError> {
-    let value = core::validate_cmp(&serde_json::json!({
-        "cmp_path": request.cmp_path,
-        "quests_dir": request.quests_dir,
-    }))?;
-    serde_json::from_value(value).map_err(|error| invalid_input(error.to_string()))
+pub fn validate_cmp(request: ValidateCmpRequest) -> Result<core::CmpValidationReport, AppError> {
+    core::validate_cmp(
+        &serde_json::json!({
+            "cmp_path": request.cmp_path,
+            "quests_dir": request.quests_dir,
+        }),
+        &request.edits,
+    )
 }
 
 pub fn apply_cmp(
@@ -182,6 +188,21 @@ mod tests {
     fn cmp_requests_reject_unknown_top_level_fields() {
         let error = serde_json::from_value::<SaveCmpTargetsRequest>(json!({
             "cmp_path": "/tmp/review.cmp",
+            "edits": [],
+            "source": "tampered"
+        }))
+        .unwrap_err();
+        assert!(error.to_string().contains("unknown field"));
+
+        let valid = serde_json::from_value::<ValidateCmpRequest>(json!({
+            "cmp_path": "/tmp/review.cmp",
+            "quests_dir": "/tmp/quests",
+            "edits": [{"index": 0, "target": "译文"}]
+        }));
+        assert!(valid.is_ok());
+        let error = serde_json::from_value::<ValidateCmpRequest>(json!({
+            "cmp_path": "/tmp/review.cmp",
+            "quests_dir": "/tmp/quests",
             "edits": [],
             "source": "tampered"
         }))

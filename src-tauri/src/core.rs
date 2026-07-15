@@ -54,6 +54,18 @@ pub struct Report {
     warnings: BTreeMap<String, Vec<String>>,
     failed_translations: BTreeMap<String, Value>,
 }
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CmpValidationReport {
+    pub belongs_to_current_task_book: bool,
+    pub source_fingerprint_matches: bool,
+    /// Entries that can be safely applied, including entries intentionally kept in English.
+    pub applicable_entries: usize,
+    pub format_guard_failures: usize,
+    pub unchanged_entries: usize,
+    pub files_to_modify: Vec<String>,
+    pub blocking: bool,
+    pub blocking_issues: Vec<String>,
+}
 #[derive(Clone)]
 pub(crate) struct Item {
     pub(crate) id: String,
@@ -116,8 +128,8 @@ pub fn apply_cmp_result(data_dir: &Path, payload: &Value) -> AppResult<Value> {
     writeback::apply_cmp_result(data_dir, payload)
 }
 
-pub fn validate_cmp(payload: &Value) -> AppResult<Value> {
-    writeback::validate_cmp(payload)
+pub fn validate_cmp(payload: &Value, edits: &[CmpTargetEdit]) -> AppResult<CmpValidationReport> {
+    writeback::validate_cmp(payload, edits)
 }
 
 pub fn export_cmp(payload: &Value) -> Result<Value, String> {
@@ -331,6 +343,143 @@ mod tests {
         .unwrap();
     }
 
+    fn tree_snapshot(root: &Path) -> BTreeMap<String, Vec<u8>> {
+        WalkDir::new(root)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_file())
+            .map(|entry| {
+                (
+                    entry
+                        .path()
+                        .strip_prefix(root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned(),
+                    fs::read(entry.path()).unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn cmp_dry_run_collects_counts_and_never_writes() {
+        let directory = tempdir().unwrap();
+        let quests = directory.path().join("config/ftbquests/quests");
+        fs::create_dir_all(quests.join("lang")).unwrap();
+        fs::write(
+            quests.join("lang/en_us.snbt"),
+            r#"{ title: "Hello", color: "Use §aGreen", keep: "Keep" }"#,
+        )
+        .unwrap();
+        let mut entries = Vec::new();
+        let mut items = Vec::new();
+        for (index, (key, value)) in snbt::load(&quests.join("lang/en_us.snbt"))
+            .unwrap()
+            .into_iter()
+            .enumerate()
+        {
+            let source = match value {
+                LangValue::Text(value) => value,
+                LangValue::Lines(values) => values.join("\n"),
+            };
+            let (entry, entry_items) = prepare_entry(key, source, index, None);
+            entries.push(entry);
+            items.extend(entry_items);
+        }
+        let cmp_path = directory.path().join("review.cmp");
+        cmp::write(
+            &cmp_path,
+            &cmp::Document {
+                meta: cmp::Meta {
+                    version: 1,
+                    task_id: "dry-run-test".into(),
+                    quests_dir: quests.display().to_string(),
+                    mode: "lang".into(),
+                    source_fingerprint: source_fingerprint(&entries),
+                    provider: providers::GOOGLE_WEB.into(),
+                    base_url: "https://translate.googleapis.com".into(),
+                    model: "google-web".into(),
+                    style: "自然中文".into(),
+                    glossary_enabled: false,
+                    glossary_fingerprint: String::new(),
+                    total_entries: entries.len(),
+                    cache_hits: 0,
+                },
+                records: items
+                    .iter()
+                    .map(|item| cmp::Record {
+                        file: "lang/en_us.snbt".into(),
+                        entry_id: item.entry_id.clone(),
+                        path: item.path.clone(),
+                        source: item.source.clone(),
+                        target: match item.source.as_str() {
+                            "Hello" => "你好".into(),
+                            "Use §aGreen" => "使用 §a绿色".into(),
+                            source => source.into(),
+                        },
+                        status: if item.source == "Keep" {
+                            "unchanged".into()
+                        } else {
+                            "translated".into()
+                        },
+                    })
+                    .collect(),
+            },
+        )
+        .unwrap();
+        let before = tree_snapshot(directory.path());
+        let edits = cmp::load(&cmp_path)
+            .unwrap()
+            .records
+            .iter()
+            .enumerate()
+            .map(|(index, record)| CmpTargetEdit {
+                index,
+                target: if record.source == "Use §aGreen" {
+                    "错误地删除颜色码".into()
+                } else {
+                    record.target.clone()
+                },
+            })
+            .collect::<Vec<_>>();
+
+        let report =
+            validate_cmp(&json!({"cmp_path":cmp_path,"quests_dir":quests}), &edits).unwrap();
+
+        assert!(report.belongs_to_current_task_book);
+        assert!(report.source_fingerprint_matches);
+        assert_eq!(report.applicable_entries, 2);
+        assert_eq!(report.format_guard_failures, 1);
+        assert_eq!(report.unchanged_entries, 1);
+        assert_eq!(report.files_to_modify, ["lang/zh_cn.snbt"]);
+        assert!(report.blocking);
+        assert!(!report.blocking_issues.is_empty());
+        assert_eq!(tree_snapshot(directory.path()), before);
+        assert!(!quests.join("lang/zh_cn.snbt").exists());
+        assert!(!quests.join(".ftb-translater").exists());
+    }
+
+    #[test]
+    fn cmp_dry_run_returns_a_blocking_report_for_changed_source() {
+        let directory = tempdir().unwrap();
+        let quests = directory.path().join("config/ftbquests/quests");
+        fs::create_dir_all(quests.join("lang")).unwrap();
+        fs::write(quests.join("lang/en_us.snbt"), r#"{ title: "Hello" }"#).unwrap();
+        let cmp_path = directory.path().join("review.cmp");
+        write_test_cmp(&cmp_path, &quests, "Hello", "Hello", "你好");
+        fs::write(quests.join("lang/en_us.snbt"), r#"{ title: "Changed" }"#).unwrap();
+
+        let report = validate_cmp(&json!({"cmp_path":cmp_path,"quests_dir":quests}), &[]).unwrap();
+
+        assert!(report.belongs_to_current_task_book);
+        assert!(!report.source_fingerprint_matches);
+        assert!(report.blocking);
+        assert_eq!(report.applicable_entries, 0);
+        assert_eq!(report.format_guard_failures, 0);
+        assert!(report.files_to_modify.is_empty());
+    }
+
     #[test]
     fn retry_validation_rejects_another_pack_or_modified_source() {
         let directory = tempdir().unwrap();
@@ -444,12 +593,21 @@ mod tests {
         assert_eq!(after.status, before.status);
         assert_eq!(after.target, "错误地删除颜色码");
 
-        let error = validate_cmp(&json!({
-            "cmp_path": cmp_path,
-            "quests_dir": quests,
-        }))
-        .unwrap_err();
-        assert_eq!(error.code, ErrorCode::FormatGuardRejected);
+        let report = validate_cmp(
+            &json!({
+                "cmp_path": cmp_path,
+                "quests_dir": quests,
+            }),
+            &[],
+        )
+        .unwrap();
+        assert!(report.blocking);
+        assert_eq!(report.format_guard_failures, 1);
+        assert!(apply_cmp(
+            &directory.path().join("app-data"),
+            &json!({"cmp_path":cmp_path,"quests_dir":quests}),
+        )
+        .is_err());
         assert!(!quests.join("lang/zh_cn.snbt").exists());
         assert!(!quests.join(".ftb-translater/backups").exists());
     }

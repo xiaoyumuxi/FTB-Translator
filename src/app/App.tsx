@@ -5,7 +5,7 @@ import { CmpDecisionDialog, ConfirmDialog } from "../components/Dialogs";
 import { Nav } from "../components/Nav";
 import { QuestMark } from "../components/QuestMark";
 import { useTauriEvents } from "../hooks/useTauriEvents";
-import type { CmpDraft, CmpEntry } from "../models/cmp";
+import type { CmpDraft, CmpEntry, CmpValidationReport } from "../models/cmp";
 import {
   defaultSettings,
   providerOptions,
@@ -59,6 +59,8 @@ export function App() {
   const [confirm, setConfirm] = useState(false);
   const [cmpDraft, setCmpDraft] = useState<CmpDraft | null>(null);
   const [cmpEntries, setCmpEntries] = useState<CmpEntry[]>([]);
+  const [cmpValidation, setCmpValidation] = useState<CmpValidationReport | null>(null);
+  const [validatingCmp, setValidatingCmp] = useState(false);
   const [reviewPrompt, setReviewPrompt] = useState(false);
 
   useEffect(() => {
@@ -145,6 +147,7 @@ export function App() {
       setProgress(100);
       setStage("review");
       setCmpDraft(draft);
+      setCmpValidation(null);
       void loadCmpEntries(draft);
       setReviewPrompt(true);
       setLogs((value) => [...value, note("API 翻译完成，已打开可编辑校对表格，尚未覆盖任务书。")]);
@@ -368,7 +371,10 @@ export function App() {
         cmp_path: cmpDraft.cmp_path,
         quests_dir: scan.quests_dir,
       };
-      await validateCmp(request);
+      const validation = await validateCmp(request);
+      if (validation.blocking) {
+        throw new Error(validation.blocking_issues[0] || "CMP 存在阻断问题");
+      }
       const result = await applyCmpCommand(request);
       setBusy(false);
       setProgress(100);
@@ -391,6 +397,41 @@ export function App() {
       setBusy(false);
       setStage("review");
       notify(errorText(error));
+    }
+  }
+
+  async function validateCurrentCmp() {
+    if (!scan || !cmpDraft) return;
+    setCmpValidation(null);
+    setValidatingCmp(true);
+    void frontendLog("info", "cmp_dry_run_started", "用户开始仅验证 CMP", {
+      task_id: cmpDraft.task_id || "",
+      cmp_path: cmpDraft.cmp_path,
+      entries: cmpEntries.length,
+    });
+    try {
+      const validation = await validateCmp(
+        { cmp_path: cmpDraft.cmp_path, quests_dir: scan.quests_dir },
+        cmpEntries,
+      );
+      setCmpValidation(validation);
+      void frontendLog("info", "cmp_dry_run_completed", "CMP 仅验证完成", {
+        task_id: cmpDraft.task_id || "",
+        blocking: validation.blocking,
+        applicable_entries: validation.applicable_entries,
+        format_guard_failures: validation.format_guard_failures,
+        output_files: validation.files_to_modify.length,
+      });
+      notify(validation.blocking ? "CMP 验证完成，发现阻断问题" : "CMP 验证通过，未修改任何文件");
+    } catch (error) {
+      void frontendLog("warn", "cmp_dry_run_failed", "CMP 仅验证请求失败", {
+        task_id: cmpDraft.task_id || "",
+        cmp_path: cmpDraft.cmp_path,
+        error: errorText(error),
+      });
+      notify(errorText(error));
+    } finally {
+      setValidatingCmp(false);
     }
   }
 
@@ -452,6 +493,7 @@ export function App() {
           failed_count: 0,
         };
     setCmpDraft(draft);
+    setCmpValidation(null);
     setStage("review");
     setReviewPrompt(false);
     await loadCmpEntries(draft);
@@ -564,7 +606,12 @@ export function App() {
             warnings={warningCount}
             cmpDraft={cmpDraft}
             cmpEntries={cmpEntries}
-            setCmpEntries={setCmpEntries}
+            setCmpEntries={(value) => {
+              setCmpValidation(null);
+              setCmpEntries(value);
+            }}
+            cmpValidation={cmpValidation}
+            validatingCmp={validatingCmp}
             onChoose={chooseFolder}
             onScan={() => doScan()}
             onTranslate={() => setConfirm(true)}
@@ -572,6 +619,7 @@ export function App() {
             onOpenCmp={openCmp}
             onExportCmp={exportCmp}
             onChooseCmp={chooseCmp}
+            onValidateCmp={validateCurrentCmp}
             onApplyCmp={applyCmp}
             onRetryRateLimited={retryRateLimited}
           />

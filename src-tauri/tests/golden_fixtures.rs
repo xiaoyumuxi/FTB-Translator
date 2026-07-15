@@ -228,6 +228,37 @@ mod application {
                 mock_document(case, &quests.display().to_string(), mode, &entries, &items);
             let cmp_path = directory.path().join("review.cmp");
             cmp::write(&cmp_path, &document).unwrap();
+            let source_before_validation = if mode == "lang" {
+                vec![(
+                    quests.join("lang/en_us.snbt"),
+                    fs::read(quests.join("lang/en_us.snbt")).unwrap(),
+                )]
+            } else {
+                chapters::files(&quests)
+                    .into_iter()
+                    .map(|path| (path.clone(), fs::read(path).unwrap()))
+                    .collect()
+            };
+            let cmp_before_validation = fs::read(&cmp_path).unwrap();
+            let validation =
+                validate_cmp(&json!({"cmp_path":cmp_path,"quests_dir":quests}), &[]).unwrap();
+            assert!(!validation.blocking);
+            assert_eq!(validation.applicable_entries, entries.len());
+            assert_eq!(validation.format_guard_failures, 0);
+            assert_eq!(
+                validation.files_to_modify,
+                if mode == "lang" {
+                    vec!["lang/zh_cn.snbt".to_string()]
+                } else {
+                    expected_files.keys().cloned().collect::<Vec<_>>()
+                }
+            );
+            assert_eq!(fs::read(&cmp_path).unwrap(), cmp_before_validation);
+            for (path, content) in source_before_validation {
+                assert_eq!(fs::read(path).unwrap(), content);
+            }
+            assert!(!quests.join(".ftb-translater").exists());
+            assert!(!quests.join("lang/zh_cn.snbt").exists());
             let result = apply_cmp(
                 &directory.path().join("app-data"),
                 &json!({"cmp_path":cmp_path,"quests_dir":quests}),

@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { CmpEntry } from "../models/cmp";
+import type { CmpEntry, CmpValidationReport } from "../models/cmp";
 import type { LogLevel, SettingsData } from "../models/settings";
 import type { Report, ScanResult } from "../models/translation";
 
@@ -87,8 +87,14 @@ export function saveCmpTargets(cmpPath: string, entries: CmpEntry[]) {
   });
 }
 
-export function validateCmp(request: { cmp_path: string; quests_dir: string }) {
-  return typedCall<{ valid: boolean }>("validate_cmp", request);
+export function validateCmp(
+  request: { cmp_path: string; quests_dir: string },
+  entries: CmpEntry[] = [],
+) {
+  return typedCall<CmpValidationReport>("validate_cmp", {
+    ...request,
+    edits: entries.map(({ index, target }) => ({ index, target })),
+  });
 }
 
 export function applyCmp(request: { cmp_path: string; quests_dir: string }) {

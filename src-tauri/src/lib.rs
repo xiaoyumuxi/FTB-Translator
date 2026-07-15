@@ -161,8 +161,8 @@ fn save_cmp_targets(
 
 #[tauri::command]
 fn validate_cmp(
-    request: commands::CmpScopeRequest,
-) -> Result<commands::ValidateCmpResponse, AppError> {
+    request: commands::ValidateCmpRequest,
+) -> Result<core::CmpValidationReport, AppError> {
     commands::validate_cmp(request)
 }
 

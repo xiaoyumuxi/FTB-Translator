@@ -14,7 +14,7 @@ import {
   ShieldCheck,
   Upload,
 } from "lucide-react";
-import type { CmpDraft, CmpEntry } from "../models/cmp";
+import type { CmpDraft, CmpEntry, CmpValidationReport } from "../models/cmp";
 import type { Activity, Report, ScanResult, Stage } from "../models/translation";
 import { CmpTable } from "../components/CmpTable";
 import { Metric } from "../components/Metric";
@@ -36,6 +36,8 @@ type WorkbenchPageProps = {
   cmpDraft: CmpDraft | null;
   cmpEntries: CmpEntry[];
   setCmpEntries: Dispatch<SetStateAction<CmpEntry[]>>;
+  cmpValidation: CmpValidationReport | null;
+  validatingCmp: boolean;
   onChoose: () => void;
   onScan: () => void;
   onTranslate: () => void;
@@ -43,6 +45,7 @@ type WorkbenchPageProps = {
   onOpenCmp: () => void;
   onExportCmp: () => void;
   onChooseCmp: () => void;
+  onValidateCmp: () => void;
   onApplyCmp: () => void;
   onRetryRateLimited: () => void;
 };
@@ -223,9 +226,12 @@ export function WorkbenchPage(props: WorkbenchPageProps) {
             draft={props.cmpDraft}
             entries={props.cmpEntries}
             setEntries={props.setCmpEntries}
+            validation={props.cmpValidation}
+            validating={props.validatingCmp}
             onOpen={props.onOpenCmp}
             onExport={props.onExportCmp}
             onChoose={props.onChooseCmp}
+            onValidate={props.onValidateCmp}
             onApply={props.onApplyCmp}
           />
         </>

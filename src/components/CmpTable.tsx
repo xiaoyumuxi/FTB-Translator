@@ -1,22 +1,28 @@
 import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
-import { Download, FileText, ShieldCheck, Upload } from "lucide-react";
-import type { CmpDraft, CmpEntry } from "../models/cmp";
+import { CircleAlert, Download, FileCheck2, FileText, ShieldCheck, Upload } from "lucide-react";
+import type { CmpDraft, CmpEntry, CmpValidationReport } from "../models/cmp";
 
 export function CmpTable({
   draft: _draft,
   entries,
   setEntries,
+  validation,
+  validating,
   onOpen,
   onExport,
   onChoose,
+  onValidate,
   onApply,
 }: {
   draft: CmpDraft;
   entries: CmpEntry[];
   setEntries: Dispatch<SetStateAction<CmpEntry[]>>;
+  validation: CmpValidationReport | null;
+  validating: boolean;
   onOpen: () => void;
   onExport: () => void;
   onChoose: () => void;
+  onValidate: () => void;
   onApply: () => void;
 }) {
   const [query, setQuery] = useState("");
@@ -97,10 +103,37 @@ export function CmpTable({
         <button className="secondary" onClick={onChoose}>
           <Upload />导入 CMP
         </button>
+        <button className="secondary" disabled={validating} onClick={onValidate}>
+          <FileCheck2 />{validating ? "正在验证" : "验证 CMP"}
+        </button>
         <button className="primary" onClick={onApply}>
           <ShieldCheck />确认并覆盖
         </button>
       </div>
+      {validation && (
+        <div className={`cmp-validation-summary ${validation.blocking ? "blocking" : "ready"}`}>
+          <div>
+            {validation.blocking ? <CircleAlert /> : <FileCheck2 />}
+            <strong>{validation.blocking ? "发现阻断问题" : "CMP 可以安全应用"}</strong>
+            <span>本次仅验证，未修改任何文件</span>
+          </div>
+          <dl>
+            <div><dt>任务书归属</dt><dd>{validation.belongs_to_current_task_book ? "一致" : "不一致"}</dd></div>
+            <div><dt>源指纹</dt><dd>{validation.source_fingerprint_matches ? "一致" : "不一致"}</dd></div>
+            <div><dt>可应用</dt><dd>{validation.applicable_entries}</dd></div>
+            <div><dt>格式失败</dt><dd>{validation.format_guard_failures}</dd></div>
+            <div><dt>保持英文</dt><dd>{validation.unchanged_entries}</dd></div>
+          </dl>
+          {validation.files_to_modify.length > 0 && (
+            <p>预计修改：{validation.files_to_modify.join("、")}</p>
+          )}
+          {validation.blocking_issues.length > 0 && (
+            <ul>
+              {validation.blocking_issues.map((issue, index) => <li key={`${index}-${issue}`}>{issue}</li>)}
+            </ul>
+          )}
+        </div>
+      )}
       <div className="review-table-scroll">
         <table>
           <thead>
