@@ -22,7 +22,7 @@ Google 网页翻译是默认模式，无需任何 Key。DeepL 网页模式同样
 
 ### 从源码启动
 
-需要 Node.js 20+、Rust stable 和 [Tauri 2 对应的系统依赖](https://tauri.app/start/prerequisites/)。
+需要 Node.js 24+、Rust stable 和 [Tauri 2 对应的系统依赖](https://tauri.app/start/prerequisites/)。
 
 ```bash
 npm install
