@@ -1,18 +1,19 @@
 # 架构概览
 
-本文面向维护者，描述 `d313958` 基线上的实际实现。产品用法见 [README](../README.md)，CMP 文件语法见 [CMP v1 规范](cmp-format.md)，本文不重复用户操作说明。
+本文面向维护者，描述从 `d313958` 行为基线演进而来的当前实现。产品用法见 [README](../README.md)，CMP 文件语法见 [CMP v1 规范](cmp-format.md)，本文不重复用户操作说明。
 
 ## 系统边界
 
 FTB Translater 是 Rust + Tauri 2 后端与 React + TypeScript 前端组成的桌面应用，运行时没有 Python sidecar。
 
 ```text
-React 界面（src/main.tsx）
+React 界面（src/{App,components,services,types}.tsx/ts）
         │ Tauri command / event
         ▼
-命令桥接（src-tauri/src/lib.rs）
+强类型工作流命令（commands.rs / protocol.rs）
         │
-        ├── 翻译编排与写回（core.rs）
+        ├── 核心 façade（core.rs）
+        │     ├── 扫描、保护、翻译、校对、写回（core/*.rs）
         │     ├── lang SNBT（snbt.rs）
         │     ├── chapters SNBT（chapters.rs）
         │     ├── JSON 富文本（rich_text.rs）
@@ -82,7 +83,7 @@ React 界面（src/main.tsx）
 - 当前 `chapters` 提取仍依赖受限正则，不等于完整 SNBT token walker。历史 Python 实现曾使用 token span walker；为何不应扩大为“用正则解析所有 SNBT”见 [ADR-001](decisions/001-token-span-over-regex.md)。
 - 历史 Python 格式守卫有轻量颜色/样式 AST；当前 Rust 版只把颜色码当不透明 token 并比较排序后的多重集合，尚不能证明样式作用域等价。见 [ADR-002](decisions/002-colour-ast.md)。
 - 文件提交是应用级补偿事务，不是文件系统原子事务；进程崩溃或回滚自身失败仍需使用已创建的备份人工恢复。
-- 当前自动测试集中在 Rust 单元与少量临时目录集成测试，尚无前端组件测试和完整离线 provider→CMP→多文件写回 golden fixtures。见 [测试策略](testing-strategy.md)。
+- 当前已有 Rust 单元测试、临时目录流程测试，以及使用确定性 Mock 响应的 `lang`/`chapters` 扫描→CMP→备份→写回 Golden fixture；尚无前端组件/浏览器测试，异步 HTTP provider 也未通过可注入客户端贯穿 Golden。见 [测试策略](testing-strategy.md)。
 
 ## 决策索引
 

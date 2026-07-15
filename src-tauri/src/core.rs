@@ -572,6 +572,18 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(changed_english.code, ErrorCode::CmpInvalid);
+
+        document.records[0].source = "Hello".into();
+        document.records[0].path = "/changed".into();
+        let changed_path = validate_cmp_source(
+            &document,
+            &quests,
+            "lang",
+            std::slice::from_ref(&entry),
+            &items,
+        )
+        .unwrap_err();
+        assert_eq!(changed_path.code, ErrorCode::CmpInvalid);
     }
 
     #[test]

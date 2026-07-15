@@ -92,7 +92,7 @@ CMP v1 的完整字段、解析规则、状态含义和兼容性约束见 [`docs
 
 ### 2. Token 保护
 
-翻译前，每条原文会经过一道**占位符替换**流程（`core.rs::protect`）：
+翻译前，每条原文会经过一道**占位符替换**流程（`core/protection.rs::protect`）：
 
 用正则匹配以下模式，将它们替换为 `⟨P_0⟩`、`⟨P_1⟩`…… 形式的不透明占位符：
 
@@ -188,7 +188,7 @@ API 返回后，每条译文经过两步处理：
 
 恢复前会严格比较不透明占位符集合。任何占位符被删除、修改、重复或凭空增加，整条翻译都会回退原文；API 返回的未知 `⟨P_N⟩` / `⟨G_N⟩` 不会进入输出文件。
 
-**校验**（`core.rs::warnings`）：对恢复后的译文与原文做以下比较：
+**校验**（`core/translation.rs::warnings`）：对恢复后的译文与原文做以下比较：
 - 换行、回车、制表符数量是否一致
 - 保护 token 集合（排序后）是否完全一致——即没有缺失、没有多余
 - 如果原文是 JSON 文本组件，校验除允许回填的展示文本外，所有键、类型和非展示字段是否保持不变
@@ -232,6 +232,7 @@ API 返回后，每条译文经过两步处理：
 - [翻译流水线](docs/translation-pipeline.md)：扫描、保护、缓存、提供商调用、CMP 生成与限流重试
 - [CMP 写回事务](docs/writeback-transaction.md)：重新验证、备份、提交、回滚与提交后告警
 - [测试策略](docs/testing-strategy.md)：现有覆盖、最低门禁、离线测试方向与已知缺口
+- [发布检查表](docs/release-checklist.md)：版本、质量门禁、安装包、手工桌面与发布步骤
 - [架构决策记录（ADR）](docs/architecture.md#决策索引)：SNBT 解析、颜色码、Tauri 迁移、CMP 和限流一致性
 - [CMP v1 格式规范](docs/cmp-format.md) · [诊断日志规范](docs/logging.md) · [当前行为基线](docs/current-baseline.md)
 
