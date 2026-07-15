@@ -108,6 +108,7 @@ pub struct ApplyCmpResponse {
     pub report: core::Report,
     pub run_id: i64,
     pub task_id: String,
+    pub post_commit_warnings: Vec<String>,
 }
 
 pub fn invalid_input(error: impl Into<String>) -> AppError {

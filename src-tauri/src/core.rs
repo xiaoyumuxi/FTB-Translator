@@ -164,7 +164,11 @@ pub(crate) use translation::{cache_key, load_cache, save_cache, warnings};
 pub(crate) use protection::protect_for_translation;
 
 #[cfg(test)]
-pub(crate) use writeback::{apply_cmp_inner, backup, commit_outputs, FileOutput};
+pub(crate) use writeback::{
+    apply_cmp_inner, apply_cmp_inner_with_options, backup_with_options,
+    commit_outputs_with_options, AuxiliaryFault, BackupFault, CommitFault, FileOutput,
+    WritebackOptions,
+};
 
 #[cfg(test)]
 mod tests {
@@ -362,6 +366,40 @@ mod tests {
             .collect()
     }
 
+    fn transaction_artifacts(root: &Path) -> Vec<PathBuf> {
+        WalkDir::new(root)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_file())
+            .map(|entry| entry.into_path())
+            .filter(|path| {
+                path.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .contains(".ftb-translater-")
+            })
+            .collect()
+    }
+
+    fn apply_test_cmp_with_options(
+        data_dir: &Path,
+        cmp_path: &Path,
+        quests: &Path,
+        options: &WritebackOptions,
+    ) -> AppResult<Value> {
+        let phase = std::cell::Cell::new("validation");
+        apply_cmp_inner_with_options(
+            Some(data_dir),
+            &json!({"cmp_path":cmp_path,"quests_dir":quests.display().to_string()}),
+            cmp_path.to_path_buf(),
+            cmp::load(cmp_path).unwrap(),
+            "test-task",
+            &phase,
+            false,
+            options,
+        )
+    }
+
     #[test]
     fn cmp_dry_run_collects_counts_and_never_writes() {
         let directory = tempdir().unwrap();
@@ -552,6 +590,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result["report"]["translated_entries"], 1);
+        assert!(result["post_commit_warnings"]
+            .as_array()
+            .unwrap()
+            .is_empty());
         let translated = snbt::load(&quests.join("lang/zh_cn.snbt")).unwrap();
         assert_eq!(translated[0].1, LangValue::Text("你好".into()));
     }
@@ -613,25 +655,77 @@ mod tests {
     }
 
     #[test]
-    fn history_failure_after_commit_does_not_report_writeback_failure() {
+    fn history_failure_after_commit_returns_success_with_an_unavailable_run_id() {
         let directory = tempdir().unwrap();
         let quests = directory.path().join("config/ftbquests/quests");
         fs::create_dir_all(quests.join("lang")).unwrap();
         fs::write(quests.join("lang/en_us.snbt"), r#"{ title: "Hello" }"#).unwrap();
         let cmp_path = directory.path().join("review.cmp");
         write_test_cmp(&cmp_path, &quests, "Hello", "Hello", "你好");
-        let unusable_data_dir = directory.path().join("app-data-file");
-        fs::write(&unusable_data_dir, "not a directory").unwrap();
+        let options = WritebackOptions {
+            auxiliary_fault: AuxiliaryFault::History,
+            ..WritebackOptions::default()
+        };
 
-        let result = apply_cmp(
-            &unusable_data_dir,
-            &json!({"cmp_path":cmp_path,"quests_dir":quests.display().to_string()}),
+        let result = apply_test_cmp_with_options(
+            &directory.path().join("app-data"),
+            &cmp_path,
+            &quests,
+            &options,
         )
         .unwrap();
 
         assert_eq!(result["run_id"], 0);
+        assert_eq!(result["post_commit_warnings"].as_array().unwrap().len(), 1);
+        assert!(result["post_commit_warnings"][0]
+            .as_str()
+            .unwrap()
+            .contains("运行编号不可用"));
         let translated = snbt::load(&quests.join("lang/zh_cn.snbt")).unwrap();
         assert_eq!(translated[0].1, LangValue::Text("你好".into()));
+        assert!(quests.join(".ftb-translater/report-latest.json").is_file());
+    }
+
+    #[test]
+    fn report_failure_after_commit_returns_success_and_preserves_history() {
+        let directory = tempdir().unwrap();
+        let quests = directory.path().join("config/ftbquests/quests");
+        fs::create_dir_all(quests.join("lang")).unwrap();
+        fs::write(quests.join("lang/en_us.snbt"), r#"{ title: "Hello" }"#).unwrap();
+        let cmp_path = directory.path().join("review.cmp");
+        write_test_cmp(&cmp_path, &quests, "Hello", "Hello", "你好");
+        let options = WritebackOptions {
+            auxiliary_fault: AuxiliaryFault::Report,
+            ..WritebackOptions::default()
+        };
+
+        let result = apply_test_cmp_with_options(
+            &directory.path().join("app-data"),
+            &cmp_path,
+            &quests,
+            &options,
+        )
+        .unwrap();
+
+        assert!(result["run_id"].as_i64().unwrap() > 0);
+        assert_eq!(result["post_commit_warnings"].as_array().unwrap().len(), 1);
+        assert!(result["post_commit_warnings"][0]
+            .as_str()
+            .unwrap()
+            .contains("报告保存失败"));
+        assert!(!quests.join(".ftb-translater/report-latest.json").exists());
+        let translated = snbt::load(&quests.join("lang/zh_cn.snbt")).unwrap();
+        assert_eq!(translated[0].1, LangValue::Text("你好".into()));
+        assert_eq!(
+            History::new(&directory.path().join("app-data"))
+                .unwrap()
+                .list()
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -652,28 +746,149 @@ mod tests {
     }
 
     #[test]
-    fn failed_output_write_restores_already_written_files() {
+    fn second_output_replace_failure_restores_all_files() {
         let d = tempdir().unwrap();
         let first = d.path().join("first.snbt");
-        fs::write(&first, "original").unwrap();
+        let second = d.path().join("second.snbt");
+        fs::write(&first, "original first").unwrap();
+        fs::write(&second, "original second").unwrap();
         let outputs = vec![
             FileOutput {
                 path: first.clone(),
                 archive_name: "first.snbt".into(),
-                content: "translated".into(),
+                content: "translated first".into(),
             },
             FileOutput {
-                path: d.path().join("missing/second.snbt"),
+                path: second.clone(),
                 archive_name: "second.snbt".into(),
-                content: "translated".into(),
+                content: "translated second".into(),
             },
         ];
+        let options = WritebackOptions {
+            commit_fault: CommitFault::Replace(1),
+            ..WritebackOptions::default()
+        };
 
-        let error = commit_outputs(&outputs, "test-task").unwrap_err();
+        let error = commit_outputs_with_options(&outputs, "test-task", &options).unwrap_err();
         assert_eq!(error.code, ErrorCode::CommitFailed);
+        assert!(error.retryable);
         assert!(!error.task_book_modified);
         assert!(error.user_message.contains("已恢复此前写入的文件"));
-        assert_eq!(fs::read_to_string(first).unwrap(), "original");
+        assert_eq!(fs::read_to_string(first).unwrap(), "original first");
+        assert_eq!(fs::read_to_string(second).unwrap(), "original second");
+        assert!(transaction_artifacts(d.path()).is_empty());
+    }
+
+    #[test]
+    fn temporary_file_create_failure_touches_no_outputs() {
+        let directory = tempdir().unwrap();
+        let target = directory.path().join("output.snbt");
+        fs::write(&target, "original").unwrap();
+        let outputs = [FileOutput {
+            path: target.clone(),
+            archive_name: "output.snbt".into(),
+            content: "translated".into(),
+        }];
+        let options = WritebackOptions {
+            commit_fault: CommitFault::TempCreate(0),
+            ..WritebackOptions::default()
+        };
+
+        let error = commit_outputs_with_options(&outputs, "test-task", &options).unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::CommitFailed);
+        assert!(error.retryable);
+        assert!(!error.task_book_modified);
+        assert_eq!(fs::read_to_string(target).unwrap(), "original");
+        assert!(transaction_artifacts(directory.path()).is_empty());
+    }
+
+    #[test]
+    fn failure_after_temporary_file_creation_cleans_the_current_file() {
+        let directory = tempdir().unwrap();
+        let target = directory.path().join("output.snbt");
+        fs::write(&target, "original").unwrap();
+        let outputs = [FileOutput {
+            path: target.clone(),
+            archive_name: "output.snbt".into(),
+            content: "translated".into(),
+        }];
+        let options = WritebackOptions {
+            commit_fault: CommitFault::TempPrepare(0),
+            ..WritebackOptions::default()
+        };
+
+        let error = commit_outputs_with_options(&outputs, "test-task", &options).unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::CommitFailed);
+        assert!(error.retryable);
+        assert!(!error.task_book_modified);
+        assert_eq!(fs::read_to_string(target).unwrap(), "original");
+        assert!(transaction_artifacts(directory.path()).is_empty());
+    }
+
+    #[test]
+    fn final_replace_failure_restores_an_existing_target() {
+        let directory = tempdir().unwrap();
+        let target = directory.path().join("output.snbt");
+        fs::write(&target, "original").unwrap();
+        let outputs = [FileOutput {
+            path: target.clone(),
+            archive_name: "output.snbt".into(),
+            content: "translated".into(),
+        }];
+        let options = WritebackOptions {
+            commit_fault: CommitFault::Replace(0),
+            ..WritebackOptions::default()
+        };
+
+        let error = commit_outputs_with_options(&outputs, "test-task", &options).unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::CommitFailed);
+        assert!(error.retryable);
+        assert!(!error.task_book_modified);
+        assert_eq!(fs::read_to_string(target).unwrap(), "original");
+        assert!(transaction_artifacts(directory.path()).is_empty());
+    }
+
+    #[test]
+    fn rollback_failure_marks_the_task_book_as_modified() {
+        let directory = tempdir().unwrap();
+        let first = directory.path().join("first.snbt");
+        let second = directory.path().join("second.snbt");
+        fs::write(&first, "original first").unwrap();
+        fs::write(&second, "original second").unwrap();
+        let outputs = [
+            FileOutput {
+                path: first.clone(),
+                archive_name: "first.snbt".into(),
+                content: "translated first".into(),
+            },
+            FileOutput {
+                path: second.clone(),
+                archive_name: "second.snbt".into(),
+                content: "translated second".into(),
+            },
+        ];
+        let options = WritebackOptions {
+            commit_fault: CommitFault::ReplaceAndRollback {
+                replace_index: 1,
+                rollback_index: 0,
+            },
+            ..WritebackOptions::default()
+        };
+
+        let error = commit_outputs_with_options(&outputs, "test-task", &options).unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::CommitFailed);
+        assert!(error.retryable);
+        assert!(error.task_book_modified);
+        assert!(error.user_message.contains("恢复失败"));
+        assert!(!first.exists());
+        assert_eq!(fs::read_to_string(second).unwrap(), "original second");
+        assert!(transaction_artifacts(directory.path())
+            .iter()
+            .any(|path| path.to_string_lossy().contains("rollback")));
     }
 
     #[test]
@@ -682,12 +897,86 @@ mod tests {
         let quests = directory.path().join("quests");
         fs::create_dir_all(quests.join("lang")).unwrap();
         fs::write(quests.join("lang/en_us.snbt"), "{a: \"A\"}").unwrap();
-        fs::write(quests.join(".ftb-translater"), "blocks backup directory").unwrap();
+        for fault in [
+            BackupFault::ParentCreate,
+            BackupFault::SnapshotCreate,
+            BackupFault::CopyFile(0),
+        ] {
+            let options = WritebackOptions {
+                backup_fault: fault,
+                ..WritebackOptions::default()
+            };
+            let error = backup_with_options(&quests, "lang", &options).unwrap_err();
+            assert_eq!(error.code, ErrorCode::BackupFailed);
+            assert!(error.retryable);
+            assert!(!error.task_book_modified);
+            assert_eq!(
+                fs::read_to_string(quests.join("lang/en_us.snbt")).unwrap(),
+                "{a: \"A\"}"
+            );
+            let snapshots = quests.join(".ftb-translater/backups");
+            if snapshots.exists() {
+                assert_eq!(fs::read_dir(snapshots).unwrap().count(), 0);
+            }
+        }
+    }
 
-        let error = backup(&quests, "lang").unwrap_err();
+    #[test]
+    fn backup_failure_after_validation_never_touches_the_task_book_output() {
+        let directory = tempdir().unwrap();
+        let quests = directory.path().join("config/ftbquests/quests");
+        fs::create_dir_all(quests.join("lang")).unwrap();
+        fs::write(quests.join("lang/en_us.snbt"), r#"{ title: "Hello" }"#).unwrap();
+        let cmp_path = directory.path().join("review.cmp");
+        write_test_cmp(&cmp_path, &quests, "Hello", "Hello", "你好");
+        let options = WritebackOptions {
+            backup_fault: BackupFault::CopyFile(0),
+            ..WritebackOptions::default()
+        };
+
+        let error = apply_test_cmp_with_options(
+            &directory.path().join("app-data"),
+            &cmp_path,
+            &quests,
+            &options,
+        )
+        .unwrap_err();
+
         assert_eq!(error.code, ErrorCode::BackupFailed);
         assert!(error.retryable);
         assert!(!error.task_book_modified);
+        assert!(!quests.join("lang/zh_cn.snbt").exists());
+        assert!(transaction_artifacts(&quests).is_empty());
+        assert_eq!(
+            fs::read_to_string(quests.join("lang/en_us.snbt")).unwrap(),
+            r#"{ title: "Hello" }"#
+        );
+    }
+
+    #[test]
+    fn successful_commit_replaces_existing_and_new_targets_without_artifacts() {
+        let directory = tempdir().unwrap();
+        let existing = directory.path().join("existing.snbt");
+        let new = directory.path().join("new.snbt");
+        fs::write(&existing, "original").unwrap();
+        let outputs = [
+            FileOutput {
+                path: existing.clone(),
+                archive_name: "existing.snbt".into(),
+                content: "translated existing".into(),
+            },
+            FileOutput {
+                path: new.clone(),
+                archive_name: "new.snbt".into(),
+                content: "translated new".into(),
+            },
+        ];
+
+        commit_outputs_with_options(&outputs, "test-task", &WritebackOptions::default()).unwrap();
+
+        assert_eq!(fs::read_to_string(existing).unwrap(), "translated existing");
+        assert_eq!(fs::read_to_string(new).unwrap(), "translated new");
+        assert!(transaction_artifacts(directory.path()).is_empty());
     }
 
     #[test]
@@ -729,8 +1018,8 @@ mod tests {
         fs::create_dir_all(quests.join("lang")).unwrap();
         fs::write(quests.join("lang/en_us.snbt"), "{a: \"A\"}").unwrap();
 
-        let first = backup(&quests, "lang").unwrap();
-        let second = backup(&quests, "lang").unwrap();
+        let first = backup_with_options(&quests, "lang", &WritebackOptions::default()).unwrap();
+        let second = backup_with_options(&quests, "lang", &WritebackOptions::default()).unwrap();
 
         assert_ne!(first, second);
         assert!(first.join("lang/en_us.snbt").is_file());

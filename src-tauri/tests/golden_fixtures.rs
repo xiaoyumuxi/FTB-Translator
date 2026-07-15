@@ -347,7 +347,8 @@ mod application {
             let directory = tempdir().unwrap();
             copy_tree(&fixture.join("input"), directory.path());
             let first = directory.path().join("first.snbt");
-            let missing_second = directory.path().join("missing/second.snbt");
+            let second = directory.path().join("second.snbt");
+            fs::write(&second, "{ title: \"Original second\" }\n").unwrap();
             let outputs = vec![
                 FileOutput {
                     path: first.clone(),
@@ -355,13 +356,18 @@ mod application {
                     content: "{ title: \"Translated first\" }\n".into(),
                 },
                 FileOutput {
-                    path: missing_second.clone(),
+                    path: second.clone(),
                     archive_name: "chapters/second.snbt".into(),
                     content: "{ title: \"Translated second\" }\n".into(),
                 },
             ];
+            let options = WritebackOptions {
+                commit_fault: CommitFault::Replace(1),
+                ..WritebackOptions::default()
+            };
 
-            let error = commit_outputs(&outputs, "fixture-rollback").unwrap_err();
+            let error =
+                commit_outputs_with_options(&outputs, "fixture-rollback", &options).unwrap_err();
             assert_eq!(error.code, ErrorCode::CommitFailed);
             assert!(error.user_message.contains("已恢复此前写入的文件"));
             assert!(!error.task_book_modified);
@@ -369,7 +375,10 @@ mod application {
                 fs::read(&first).unwrap(),
                 fs::read(fixture.join("expected/first.snbt")).unwrap()
             );
-            assert!(!missing_second.exists());
+            assert_eq!(
+                fs::read_to_string(second).unwrap(),
+                "{ title: \"Original second\" }\n"
+            );
         }
 
         #[test]

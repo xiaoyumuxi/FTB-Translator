@@ -5,6 +5,147 @@ use super::{
     CmpValidationReport, Entry, EntryKind, HashMap, HashSet, History, Item, LangValue, Local, Path,
     PathBuf, Report, Settings, Value, WalkDir,
 };
+use std::{
+    fs::OpenOptions,
+    io::{self, Write},
+    sync::atomic::{AtomicU64, Ordering},
+};
+
+static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Default)]
+pub(crate) struct WritebackOptions {
+    #[cfg(test)]
+    pub(crate) backup_fault: BackupFault,
+    #[cfg(test)]
+    pub(crate) commit_fault: CommitFault,
+    #[cfg(test)]
+    pub(crate) auxiliary_fault: AuxiliaryFault,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum BackupFault {
+    #[default]
+    None,
+    ParentCreate,
+    SnapshotCreate,
+    CopyFile(usize),
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum CommitFault {
+    #[default]
+    None,
+    TempCreate(usize),
+    TempPrepare(usize),
+    Replace(usize),
+    ReplaceAndRollback {
+        replace_index: usize,
+        rollback_index: usize,
+    },
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum AuxiliaryFault {
+    #[default]
+    None,
+    History,
+    Report,
+}
+
+impl WritebackOptions {
+    fn fail_backup_parent(&self) -> bool {
+        #[cfg(test)]
+        return self.backup_fault == BackupFault::ParentCreate;
+        #[cfg(not(test))]
+        return false;
+    }
+
+    fn fail_backup_snapshot(&self) -> bool {
+        #[cfg(test)]
+        return self.backup_fault == BackupFault::SnapshotCreate;
+        #[cfg(not(test))]
+        return false;
+    }
+
+    fn fail_backup_copy(&self, index: usize) -> bool {
+        #[cfg(test)]
+        return self.backup_fault == BackupFault::CopyFile(index);
+        #[cfg(not(test))]
+        {
+            let _ = index;
+            false
+        }
+    }
+
+    fn fail_temp_create(&self, index: usize) -> bool {
+        #[cfg(test)]
+        return self.commit_fault == CommitFault::TempCreate(index);
+        #[cfg(not(test))]
+        {
+            let _ = index;
+            false
+        }
+    }
+
+    fn fail_replace(&self, index: usize) -> bool {
+        #[cfg(test)]
+        return self.commit_fault == CommitFault::Replace(index)
+            || matches!(
+                self.commit_fault,
+                CommitFault::ReplaceAndRollback { replace_index, .. } if replace_index == index
+            );
+        #[cfg(not(test))]
+        {
+            let _ = index;
+            false
+        }
+    }
+
+    fn fail_temp_prepare(&self, index: usize) -> bool {
+        #[cfg(test)]
+        return self.commit_fault == CommitFault::TempPrepare(index);
+        #[cfg(not(test))]
+        {
+            let _ = index;
+            false
+        }
+    }
+
+    fn fail_rollback(&self, index: usize) -> bool {
+        #[cfg(test)]
+        return matches!(
+            self.commit_fault,
+            CommitFault::ReplaceAndRollback { rollback_index, .. } if rollback_index == index
+        );
+        #[cfg(not(test))]
+        {
+            let _ = index;
+            false
+        }
+    }
+
+    fn fail_history(&self) -> bool {
+        #[cfg(test)]
+        return self.auxiliary_fault == AuxiliaryFault::History;
+        #[cfg(not(test))]
+        return false;
+    }
+
+    fn fail_report(&self) -> bool {
+        #[cfg(test)]
+        return self.auxiliary_fault == AuxiliaryFault::Report;
+        #[cfg(not(test))]
+        return false;
+    }
+}
+
+fn injected_error(step: &str) -> io::Error {
+    io::Error::other(format!("test fault injected at {step}"))
+}
 
 pub(crate) struct FileOutput {
     pub(crate) path: PathBuf,
@@ -12,9 +153,18 @@ pub(crate) struct FileOutput {
     pub(crate) content: String,
 }
 
-pub(crate) fn backup(q: &Path, m: &str) -> AppResult<PathBuf> {
+pub(crate) fn backup_with_options(
+    q: &Path,
+    m: &str,
+    options: &WritebackOptions,
+) -> AppResult<PathBuf> {
     let parent = q.join(".ftb-translater/backups");
-    fs::create_dir_all(&parent).map_err(|error| {
+    let parent_result = if options.fail_backup_parent() {
+        Err(injected_error("backup parent create"))
+    } else {
+        fs::create_dir_all(&parent)
+    };
+    parent_result.map_err(|error| {
         AppError::backup_failed(error.to_string(), format!("{}: {error}", parent.display()))
     })?;
     let timestamp = Local::now().format("%Y%m%d-%H%M%S").to_string();
@@ -26,7 +176,12 @@ pub(crate) fn backup(q: &Path, m: &str) -> AppResult<PathBuf> {
                 format!("{timestamp}-{attempt:03}")
             };
             let candidate = parent.join(name);
-            match fs::create_dir(&candidate) {
+            let result = if options.fail_backup_snapshot() {
+                Err(injected_error("backup snapshot create"))
+            } else {
+                fs::create_dir(&candidate)
+            };
+            match result {
                 Ok(()) => Some(Ok(candidate)),
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => None,
                 Err(error) => Some(Err(AppError::backup_failed(
@@ -39,68 +194,216 @@ pub(crate) fn backup(q: &Path, m: &str) -> AppResult<PathBuf> {
             AppError::backup_failed("无法创建唯一备份目录", parent.display().to_string())
         })??;
     let name = if m == "lang" { "lang" } else { "chapters" };
-    for e in WalkDir::new(q.join(name)) {
-        let e = e.map_err(|error| {
-            AppError::backup_failed(error.to_string(), format!("walk backup tree: {error}"))
-        })?;
-        let rel = e.path().strip_prefix(q.join(name)).unwrap();
-        let dest = root.join(name).join(rel);
-        if e.file_type().is_dir() {
-            fs::create_dir_all(&dest).map_err(|error| {
-                AppError::backup_failed(error.to_string(), format!("{}: {error}", dest.display()))
-            })?
-        } else {
-            fs::copy(e.path(), &dest).map_err(|error| {
-                AppError::backup_failed(error.to_string(), format!("{}: {error}", dest.display()))
+    let backup_result = (|| {
+        let mut file_index = 0;
+        for entry in WalkDir::new(q.join(name)) {
+            let entry = entry.map_err(|error| {
+                AppError::backup_failed(error.to_string(), format!("walk backup tree: {error}"))
             })?;
+            let rel = entry.path().strip_prefix(q.join(name)).unwrap();
+            let dest = root.join(name).join(rel);
+            if entry.file_type().is_dir() {
+                fs::create_dir_all(&dest).map_err(|error| {
+                    AppError::backup_failed(
+                        error.to_string(),
+                        format!("{}: {error}", dest.display()),
+                    )
+                })?;
+            } else {
+                let copy_result = if options.fail_backup_copy(file_index) {
+                    Err(injected_error("backup file copy"))
+                } else {
+                    fs::copy(entry.path(), &dest)
+                };
+                copy_result.map_err(|error| {
+                    AppError::backup_failed(
+                        error.to_string(),
+                        format!("{}: {error}", dest.display()),
+                    )
+                })?;
+                file_index += 1;
+            }
         }
+        Ok(())
+    })();
+    if let Err(error) = backup_result {
+        let _ = fs::remove_dir_all(&root);
+        return Err(error);
     }
     Ok(root)
 }
-fn restore_outputs(snapshots: &[(PathBuf, Option<Vec<u8>>)]) -> Vec<String> {
-    snapshots
-        .iter()
-        .rev()
-        .filter_map(|(path, original)| {
-            let result = match original {
-                Some(content) => fs::write(path, content),
-                None => match fs::remove_file(path) {
-                    Ok(()) => Ok(()),
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                    Err(error) => Err(error),
-                },
-            };
-            result
-                .err()
-                .map(|error| format!("{}：{error}", path.display()))
-        })
-        .collect()
+
+struct StagedOutput {
+    index: usize,
+    target: PathBuf,
+    temporary: PathBuf,
+    rollback: PathBuf,
+    had_original: bool,
 }
-pub(crate) fn commit_outputs(outputs: &[FileOutput], task_id: &str) -> AppResult<()> {
-    let snapshots = outputs
+
+fn sibling_path(target: &Path, kind: &str) -> PathBuf {
+    let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let name = target.file_name().unwrap_or_default().to_string_lossy();
+    target.with_file_name(format!(
+        ".{name}.ftb-translater-{kind}-{}-{sequence}",
+        std::process::id()
+    ))
+}
+
+fn create_staging_file(target: &Path) -> io::Result<(PathBuf, std::fs::File)> {
+    for _ in 0..1000 {
+        let path = sibling_path(target, "tmp");
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => return Ok((path, file)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "cannot allocate a unique staging file",
+    ))
+}
+
+fn unused_rollback_path(target: &Path) -> io::Result<PathBuf> {
+    for _ in 0..1000 {
+        let path = sibling_path(target, "rollback");
+        if !path.try_exists()? {
+            return Ok(path);
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "cannot allocate a unique rollback path",
+    ))
+}
+
+fn remove_file_if_exists(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn cleanup_staging(staged: &[StagedOutput]) {
+    for output in staged {
+        let _ = remove_file_if_exists(&output.temporary);
+    }
+}
+
+fn rollback_output(output: &StagedOutput, options: &WritebackOptions) -> io::Result<()> {
+    if output.had_original {
+        remove_file_if_exists(&output.target)?;
+        if options.fail_rollback(output.index) {
+            return Err(injected_error("output rollback"));
+        }
+        fs::rename(&output.rollback, &output.target)
+    } else {
+        remove_file_if_exists(&output.target)
+    }
+}
+
+pub(crate) fn commit_outputs_with_options(
+    outputs: &[FileOutput],
+    task_id: &str,
+    options: &WritebackOptions,
+) -> AppResult<()> {
+    let mut unique_paths = HashSet::new();
+    if let Some(duplicate) = outputs
         .iter()
-        .map(|output| match fs::read(&output.path) {
-            Ok(content) => Ok((output.path.clone(), Some(content))),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                Ok((output.path.clone(), None))
-            }
-            Err(error) => {
-                let message = format!("无法读取 {}：{error}", output.path.display());
-                Err(AppError::commit_failed(message.clone(), message, false))
-            }
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+        .find(|output| !unique_paths.insert(output.path.clone()))
+    {
+        let message = format!("输出列表包含重复路径：{}", duplicate.path.display());
+        return Err(AppError::commit_failed(message.clone(), message, false));
+    }
+
+    let mut staged = Vec::with_capacity(outputs.len());
+    // Stage every output before moving any task-book file, so preparation failures are
+    // guaranteed to leave the task book untouched.
     for (index, output) in outputs.iter().enumerate() {
-        if let Err(error) = fs::write(&output.path, &output.content) {
-            let rollback_errors = restore_outputs(&snapshots[..=index]);
+        let stage_result = (|| {
+            if options.fail_temp_create(index) {
+                return Err(injected_error("temporary file create"));
+            }
+            let (temporary, mut file) = create_staging_file(&output.path)?;
+            let prepare_result = (|| {
+                file.write_all(output.content.as_bytes())?;
+                file.sync_all()?;
+                drop(file);
+                let metadata = fs::metadata(&output.path);
+                let had_original = match metadata {
+                    Ok(metadata) => {
+                        fs::set_permissions(&temporary, metadata.permissions())?;
+                        true
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+                    Err(error) => return Err(error),
+                };
+                if options.fail_temp_prepare(index) {
+                    return Err(injected_error("temporary file prepare"));
+                }
+                Ok(StagedOutput {
+                    index,
+                    target: output.path.clone(),
+                    temporary: temporary.clone(),
+                    rollback: unused_rollback_path(&output.path)?,
+                    had_original,
+                })
+            })();
+            if prepare_result.is_err() {
+                let _ = remove_file_if_exists(&temporary);
+            }
+            prepare_result
+        })();
+        match stage_result {
+            Ok(output) => staged.push(output),
+            Err(error) => {
+                cleanup_staging(&staged);
+                let message = format!("无法为 {} 创建临时输出：{error}", output.path.display());
+                return Err(AppError::commit_failed(message.clone(), message, false));
+            }
+        }
+    }
+
+    let mut committed = Vec::new();
+    for (index, output) in staged.iter().enumerate() {
+        let mut original_moved = false;
+        let replace_result = (|| {
+            if output.had_original {
+                // Windows rename does not replace an existing destination. Move the old
+                // target aside first, then install the same-directory staged file.
+                fs::rename(&output.target, &output.rollback)?;
+                original_moved = true;
+            }
+            if options.fail_replace(index) {
+                return Err(injected_error("final output replace"));
+            }
+            fs::rename(&output.temporary, &output.target)
+        })();
+        if let Err(error) = replace_result {
+            let mut rollback_errors = Vec::new();
+            if original_moved {
+                if let Err(rollback_error) = rollback_output(output, options) {
+                    rollback_errors.push(format!("{}：{rollback_error}", output.target.display()));
+                }
+            }
+            for committed_index in committed.iter().rev().copied() {
+                let previous = &staged[committed_index];
+                if let Err(rollback_error) = rollback_output(previous, options) {
+                    rollback_errors
+                        .push(format!("{}：{rollback_error}", previous.target.display()));
+                }
+            }
+            cleanup_staging(&staged);
             logging::error(
                 "translation",
                 "output_commit_failed",
                 "输出文件提交失败并已尝试回滚",
                 json!({
                     "task_id":task_id,
-                    "path":output.path,
-                    "written_before_failure":index,
+                    "path":output.target,
+                    "committed_before_failure":index,
                     "rollback_succeeded":rollback_errors.is_empty(),
                     "rollback_error_count":rollback_errors.len(),
                     "error":error.to_string()
@@ -111,15 +414,28 @@ pub(crate) fn commit_outputs(outputs: &[FileOutput], task_id: &str) -> AppResult
             } else {
                 format!("恢复失败：{}", rollback_errors.join("；"))
             };
-            let message = format!("无法写入 {}：{error}；{rollback}", output.path.display());
+            let message = format!("无法替换 {}：{error}；{rollback}", output.target.display());
             return Err(AppError::commit_failed(
                 message,
                 format!(
-                    "write failed: {error}; rollback errors: {}",
+                    "replace failed: {error}; rollback errors: {}",
                     rollback_errors.join("; ")
                 ),
                 !rollback_errors.is_empty(),
             ));
+        }
+        committed.push(index);
+    }
+    for output in &staged {
+        if output.had_original {
+            if let Err(error) = remove_file_if_exists(&output.rollback) {
+                logging::warn(
+                    "translation",
+                    "rollback_cleanup_failed_after_commit",
+                    "任务书已提交，但旧文件清理失败",
+                    json!({"task_id":task_id,"path":output.rollback,"error":error.to_string()}),
+                );
+            }
         }
     }
     Ok(())
@@ -513,6 +829,29 @@ pub(crate) fn apply_cmp_inner(
     phase: &std::cell::Cell<&str>,
     validate_only: bool,
 ) -> AppResult<Value> {
+    apply_cmp_inner_with_options(
+        data_dir,
+        payload,
+        cmp_path,
+        document,
+        task_id,
+        phase,
+        validate_only,
+        &WritebackOptions::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn apply_cmp_inner_with_options(
+    data_dir: Option<&Path>,
+    payload: &Value,
+    cmp_path: PathBuf,
+    document: cmp::Document,
+    task_id: &str,
+    phase: &std::cell::Cell<&str>,
+    validate_only: bool,
+    options: &WritebackOptions,
+) -> AppResult<Value> {
     let selected = Path::new(payload["quests_dir"].as_str().ok_or_else(|| {
         AppError::invalid_input(
             "缺少任务书目录",
@@ -729,6 +1068,7 @@ pub(crate) fn apply_cmp_inner(
         (q.join("chapters"), q.join("chapters"))
     };
 
+    pending_outputs.sort_by(|left, right| left.path.cmp(&right.path));
     logging::info(
         "translation",
         "cmp_validation_completed",
@@ -751,7 +1091,7 @@ pub(crate) fn apply_cmp_inner(
         "开始备份当前任务书",
         json!({"task_id":task_id,"quests_dir":q,"mode":m}),
     );
-    let backup = backup(&q, m)?;
+    let backup = backup_with_options(&q, m, options)?;
     logging::info(
         "translation",
         "backup_completed",
@@ -765,7 +1105,7 @@ pub(crate) fn apply_cmp_inner(
         "开始提交全部翻译输出",
         json!({"task_id":task_id,"output_files":pending_outputs.len()}),
     );
-    commit_outputs(&pending_outputs, task_id)?;
+    commit_outputs_with_options(&pending_outputs, task_id, options)?;
     logging::info(
         "translation",
         "output_commit_completed",
@@ -812,19 +1152,28 @@ pub(crate) fn apply_cmp_inner(
         warnings: report_warnings,
         failed_translations: details,
     };
-    let report_value = serde_json::to_value(&report)
-        .map_err(|error| AppError::commit_failed(error.to_string(), error.to_string(), true))?;
+    let report_value =
+        serde_json::to_value(&report).expect("Report contains only values supported by serde_json");
     let data_dir = data_dir.expect("apply mode always provides an application data directory");
-    let history_result = match History::new(data_dir) {
-        Ok(history) => history
-            .insert(&q, m, &settings, &report_value, &outputs)
-            .map_err(|error| error.with_task_book_modified(true)),
-        Err(message) => Err(AppError::history_save_failed(
-            message.clone(),
-            message,
+    let history_result = if options.fail_history() {
+        Err(AppError::history_save_failed(
+            "任务书已写入，但翻译历史保存失败",
+            "test fault injected at history save",
             true,
-        )),
+        ))
+    } else {
+        match History::new(data_dir) {
+            Ok(history) => history
+                .insert(&q, m, &settings, &report_value, &outputs)
+                .map_err(|error| error.with_task_book_modified(true)),
+            Err(message) => Err(AppError::history_save_failed(
+                message.clone(),
+                message,
+                true,
+            )),
+        }
     };
+    let mut post_commit_warnings = Vec::new();
     let run_id = match history_result {
         Ok(run_id) => run_id,
         Err(error) => {
@@ -834,13 +1183,19 @@ pub(crate) fn apply_cmp_inner(
                 "任务书已写入，但翻译历史保存失败",
                 json!({"task_id":task_id,"quests_dir":q,"error":error}),
             );
+            post_commit_warnings
+                .push("任务书已成功写入，但翻译历史保存失败；本次运行编号不可用".to_string());
             0
         }
     };
     let report_path = q.join(".ftb-translater/report-latest.json");
-    let report_result = serde_json::to_vec_pretty(&report_value)
-        .map_err(|error| error.to_string())
-        .and_then(|bytes| fs::write(&report_path, bytes).map_err(|error| error.to_string()));
+    let report_result = if options.fail_report() {
+        Err("test fault injected at report save".to_string())
+    } else {
+        serde_json::to_vec_pretty(&report_value)
+            .map_err(|error| error.to_string())
+            .and_then(|bytes| fs::write(&report_path, bytes).map_err(|error| error.to_string()))
+    };
     if let Err(error) = report_result {
         logging::warn(
             "translation",
@@ -848,6 +1203,7 @@ pub(crate) fn apply_cmp_inner(
             "任务书已写入，但最新报告保存失败",
             json!({"task_id":task_id,"path":report_path,"error":error}),
         );
+        post_commit_warnings.push("任务书已成功写入，但最新翻译报告保存失败".to_string());
     }
     logging::info(
         "translation",
@@ -855,5 +1211,10 @@ pub(crate) fn apply_cmp_inner(
         "CMP 校对结果已写入任务书",
         json!({"task_id":task_id,"cmp_path":cmp_path,"run_id":run_id,"output_files":outputs.len()}),
     );
-    Ok(json!({"report":report,"run_id":run_id,"task_id":task_id}))
+    Ok(json!({
+        "report":report,
+        "run_id":run_id,
+        "task_id":task_id,
+        "post_commit_warnings":post_commit_warnings
+    }))
 }
