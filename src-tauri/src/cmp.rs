@@ -1,7 +1,17 @@
+use crate::error::{AppError, AppResult};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, fs, path::Path};
 
 const HEADER: &str = "# FTB Translater CMP v1";
+
+fn invalid(message: impl Into<String>) -> AppError {
+    let message = message.into();
+    AppError::cmp_invalid(message.clone(), message)
+}
+
+fn invalid_with(user_message: impl Into<String>, internal_message: impl Into<String>) -> AppError {
+    AppError::cmp_invalid(user_message, internal_message)
+}
 
 fn supported_status(status: &str) -> bool {
     matches!(
@@ -60,14 +70,17 @@ struct Location {
     status: String,
 }
 
-pub fn write(path: &Path, document: &Document) -> Result<(), String> {
+pub fn write(path: &Path, document: &Document) -> AppResult<()> {
     validate_document(document)?;
     let mut output = String::new();
     output.push_str(HEADER);
     output.push('\n');
     output.push_str("# 只修改箭头右侧的中文；保留 @ 行、英文原文、引号与 JSON 转义。\n");
     output.push_str("# meta ");
-    output.push_str(&serde_json::to_string(&document.meta).map_err(|e| e.to_string())?);
+    output.push_str(
+        &serde_json::to_string(&document.meta)
+            .map_err(|error| invalid_with(error.to_string(), error.to_string()))?,
+    );
     output.push_str("\n\n");
     // CMP file sections are presentation-only, but keeping them in a canonical order
     // makes repeated saves stable. Rust's slice sort is stable, so source order within
@@ -78,7 +91,10 @@ pub fn write(path: &Path, document: &Document) -> Result<(), String> {
     for record in records {
         if current_file != Some(record.file.as_str()) {
             output.push_str("## file ");
-            output.push_str(&serde_json::to_string(&record.file).map_err(|e| e.to_string())?);
+            output.push_str(
+                &serde_json::to_string(&record.file)
+                    .map_err(|error| invalid_with(error.to_string(), error.to_string()))?,
+            );
             output.push_str("\n\n");
             current_file = Some(record.file.as_str());
         }
@@ -90,50 +106,65 @@ pub fn write(path: &Path, document: &Document) -> Result<(), String> {
                 path: record.path.clone(),
                 status: record.status.clone(),
             })
-            .map_err(|e| e.to_string())?,
+            .map_err(|error| invalid_with(error.to_string(), error.to_string()))?,
         );
         output.push('\n');
-        output.push_str(&serde_json::to_string(&record.source).map_err(|e| e.to_string())?);
+        output.push_str(
+            &serde_json::to_string(&record.source)
+                .map_err(|error| invalid_with(error.to_string(), error.to_string()))?,
+        );
         output.push_str(" -> ");
-        output.push_str(&serde_json::to_string(&record.target).map_err(|e| e.to_string())?);
+        output.push_str(
+            &serde_json::to_string(&record.target)
+                .map_err(|error| invalid_with(error.to_string(), error.to_string()))?,
+        );
         output.push_str("\n\n");
     }
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        fs::create_dir_all(parent)
+            .map_err(|error| invalid_with(error.to_string(), error.to_string()))?;
     }
-    fs::write(path, output).map_err(|e| format!("无法保存 CMP 校对文件：{e}"))
+    fs::write(path, output)
+        .map_err(|error| invalid_with(format!("无法保存 CMP 校对文件：{error}"), error.to_string()))
 }
 
-fn validate_document(document: &Document) -> Result<(), String> {
+fn validate_document(document: &Document) -> AppResult<()> {
     if document.meta.version != 1 {
-        return Err(format!("不支持 CMP 版本 {}", document.meta.version));
+        return Err(invalid(format!(
+            "不支持 CMP 版本 {}",
+            document.meta.version
+        )));
     }
     if document.records.is_empty() {
-        return Err("CMP 文件没有翻译条目".into());
+        return Err(invalid("CMP 文件没有翻译条目"));
     }
     let mut locations = HashSet::new();
     for record in &document.records {
         if !supported_status(&record.status) {
-            return Err(format!("CMP 包含不支持的状态：{}", record.status));
+            return Err(invalid(format!("CMP 包含不支持的状态：{}", record.status)));
         }
         if !locations.insert((record.entry_id.as_str(), record.path.as_str())) {
-            return Err("CMP 重复定义同一回填位置".into());
+            return Err(invalid("CMP 重复定义同一回填位置"));
         }
     }
     Ok(())
 }
 
-pub fn load(path: &Path) -> Result<Document, String> {
-    let content = fs::read_to_string(path)
-        .map_err(|e| format!("无法读取 CMP 校对文件 {}：{e}", path.display()))?;
+pub fn load(path: &Path) -> AppResult<Document> {
+    let content = fs::read_to_string(path).map_err(|error| {
+        invalid_with(
+            format!("无法读取 CMP 校对文件 {}：{error}", path.display()),
+            error.to_string(),
+        )
+    })?;
     parse(&content)
 }
 
-pub fn parse(content: &str) -> Result<Document, String> {
+pub fn parse(content: &str) -> AppResult<Document> {
     let mut lines = content.lines().enumerate().peekable();
-    let (_, header) = lines.next().ok_or("CMP 文件为空")?;
+    let (_, header) = lines.next().ok_or_else(|| invalid("CMP 文件为空"))?;
     if header.trim_start_matches('\u{feff}') != HEADER {
-        return Err("CMP 文件头无效或版本不受支持".into());
+        return Err(invalid("CMP 文件头无效或版本不受支持"));
     }
     let mut meta = None;
     let mut records = Vec::new();
@@ -146,21 +177,30 @@ pub fn parse(content: &str) -> Result<Document, String> {
         }
         if let Some(raw) = line.strip_prefix("# meta ") {
             if meta.is_some() {
-                return Err(format!("CMP 第 {} 行重复定义 meta", line_index + 1));
+                return Err(invalid(format!(
+                    "CMP 第 {} 行重复定义 meta",
+                    line_index + 1
+                )));
             }
-            let value = serde_json::from_str::<Meta>(raw)
-                .map_err(|e| format!("CMP 第 {} 行 meta 无效：{e}", line_index + 1))?;
+            let value = serde_json::from_str::<Meta>(raw).map_err(|error| {
+                invalid_with(
+                    format!("CMP 第 {} 行 meta 无效：{error}", line_index + 1),
+                    error.to_string(),
+                )
+            })?;
             if value.version != 1 {
-                return Err(format!("不支持 CMP 版本 {}", value.version));
+                return Err(invalid(format!("不支持 CMP 版本 {}", value.version)));
             }
             meta = Some(value);
             continue;
         }
         if let Some(raw) = line.strip_prefix("## file ") {
-            current_file = Some(
-                serde_json::from_str::<String>(raw)
-                    .map_err(|e| format!("CMP 第 {} 行文件分组无效：{e}", line_index + 1))?,
-            );
+            current_file = Some(serde_json::from_str::<String>(raw).map_err(|error| {
+                invalid_with(
+                    format!("CMP 第 {} 行文件分组无效：{error}", line_index + 1),
+                    error.to_string(),
+                )
+            })?);
             continue;
         }
         if line.starts_with('#') {
@@ -168,38 +208,49 @@ pub fn parse(content: &str) -> Result<Document, String> {
         }
         let raw_location = line
             .strip_prefix("@ ")
-            .ok_or_else(|| format!("CMP 第 {} 行缺少 @ 回填位置", line_index + 1))?;
-        let location = serde_json::from_str::<Location>(raw_location)
-            .map_err(|e| format!("CMP 第 {} 行回填位置无效：{e}", line_index + 1))?;
+            .ok_or_else(|| invalid(format!("CMP 第 {} 行缺少 @ 回填位置", line_index + 1)))?;
+        let location = serde_json::from_str::<Location>(raw_location).map_err(|error| {
+            invalid_with(
+                format!("CMP 第 {} 行回填位置无效：{error}", line_index + 1),
+                error.to_string(),
+            )
+        })?;
         if current_file
             .as_deref()
             .is_some_and(|file| file != location.file)
         {
-            return Err(format!(
+            return Err(invalid(format!(
                 "CMP 第 {} 行的文件归属与当前 ## file 分组不一致",
                 line_index + 1
-            ));
+            )));
         }
         if !supported_status(&location.status) {
-            return Err(format!(
+            return Err(invalid(format!(
                 "CMP 第 {} 行包含不支持的状态：{}",
                 line_index + 1,
                 location.status
-            ));
+            )));
         }
         if !locations.insert((location.entry_id.clone(), location.path.clone())) {
-            return Err(format!("CMP 第 {} 行重复定义同一回填位置", line_index + 1));
+            return Err(invalid(format!(
+                "CMP 第 {} 行重复定义同一回填位置",
+                line_index + 1
+            )));
         }
         let (pair_index, pair) = loop {
             let next = lines
                 .next()
-                .ok_or_else(|| format!("CMP 第 {} 行缺少英文 -> 中文", line_index + 1))?;
+                .ok_or_else(|| invalid(format!("CMP 第 {} 行缺少英文 -> 中文", line_index + 1)))?;
             if !next.1.trim().is_empty() && !next.1.trim().starts_with('#') {
                 break next;
             }
         };
-        let (source, target) = parse_pair(pair.trim())
-            .map_err(|e| format!("CMP 第 {} 行无效：{e}", pair_index + 1))?;
+        let (source, target) = parse_pair(pair.trim()).map_err(|error| {
+            invalid_with(
+                format!("CMP 第 {} 行无效：{error}", pair_index + 1),
+                error.internal_message,
+            )
+        })?;
         records.push(Record {
             file: location.file,
             entry_id: location.entry_id,
@@ -209,36 +260,46 @@ pub fn parse(content: &str) -> Result<Document, String> {
             status: location.status,
         });
     }
-    let meta = meta.ok_or("CMP 文件缺少 meta")?;
+    let meta = meta.ok_or_else(|| invalid("CMP 文件缺少 meta"))?;
     if records.is_empty() {
-        return Err("CMP 文件没有翻译条目".into());
+        return Err(invalid("CMP 文件没有翻译条目"));
     }
     Ok(Document { meta, records })
 }
 
-fn parse_pair(line: &str) -> Result<(String, String), String> {
+fn parse_pair(line: &str) -> AppResult<(String, String)> {
     let mut stream = serde_json::Deserializer::from_str(line).into_iter::<String>();
     let source = stream
         .next()
-        .ok_or("缺少英文原文")?
-        .map_err(|e| format!("英文原文不是有效 JSON 字符串：{e}"))?;
+        .ok_or_else(|| invalid("缺少英文原文"))?
+        .map_err(|error| {
+            invalid_with(
+                format!("英文原文不是有效 JSON 字符串：{error}"),
+                error.to_string(),
+            )
+        })?;
     let offset = stream.byte_offset();
     let target = line[offset..]
         .strip_prefix(" -> ")
-        .ok_or("英文和中文之间必须使用空格、->、空格")?;
-    let target = serde_json::from_str::<String>(target)
-        .map_err(|e| format!("中文译文不是有效 JSON 字符串：{e}"))?;
+        .ok_or_else(|| invalid("英文和中文之间必须使用空格、->、空格"))?;
+    let target = serde_json::from_str::<String>(target).map_err(|error| {
+        invalid_with(
+            format!("中文译文不是有效 JSON 字符串：{error}"),
+            error.to_string(),
+        )
+    })?;
     Ok((source, target))
 }
 
-pub fn export(source: &Path, target: &Path) -> Result<(), String> {
+pub fn export(source: &Path, target: &Path) -> AppResult<()> {
     load(source)?;
     if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        fs::create_dir_all(parent)
+            .map_err(|error| invalid_with(error.to_string(), error.to_string()))?;
     }
     fs::copy(source, target)
         .map(|_| ())
-        .map_err(|e| format!("无法导出 CMP 校对文件：{e}"))
+        .map_err(|error| invalid_with(format!("无法导出 CMP 校对文件：{error}"), error.to_string()))
 }
 
 #[cfg(test)]
@@ -467,7 +528,8 @@ mod tests {
         invalid.records[0].status = "invented".into();
         let dir = tempdir().unwrap();
         let error = write(&dir.path().join("invalid.cmp"), &invalid).unwrap_err();
-        assert!(error.contains("invented"));
+        assert_eq!(error.code, crate::error::ErrorCode::CmpInvalid);
+        assert!(error.user_message.contains("invented"));
     }
 
     #[test]
@@ -495,7 +557,10 @@ mod tests {
             "{HEADER}\n# meta {}\n@ {{\"file\":\"lang/en_us.snbt\",\"entry_id\":\"a\",\"path\":\"$\",\"status\":\"translated\"}}\n\"A\" -> \"甲\"\n",
             serde_json::to_string(&missing).unwrap()
         );
-        assert!(parse(&missing_content).unwrap_err().contains("provider"));
+        assert!(parse(&missing_content)
+            .unwrap_err()
+            .user_message
+            .contains("provider"));
 
         let unknown_meta = missing_content.replace(
             &serde_json::to_string(&missing).unwrap(),
@@ -504,19 +569,28 @@ mod tests {
                 &serde_json::to_string(&document().meta).unwrap()[1..]
             ),
         );
-        assert!(parse(&unknown_meta).unwrap_err().contains("future"));
+        assert!(parse(&unknown_meta)
+            .unwrap_err()
+            .user_message
+            .contains("future"));
 
         let unknown_location = format!(
             "{HEADER}\n# meta {}\n@ {{\"file\":\"lang/en_us.snbt\",\"entry_id\":\"a\",\"path\":\"$\",\"status\":\"translated\",\"future\":true}}\n\"A\" -> \"甲\"\n",
             serde_json::to_string(&document().meta).unwrap()
         );
-        assert!(parse(&unknown_location).unwrap_err().contains("future"));
+        assert!(parse(&unknown_location)
+            .unwrap_err()
+            .user_message
+            .contains("future"));
 
         let missing_location = format!(
             "{HEADER}\n# meta {}\n@ {{\"file\":\"lang/en_us.snbt\",\"entry_id\":\"a\",\"status\":\"translated\"}}\n\"A\" -> \"甲\"\n",
             serde_json::to_string(&document().meta).unwrap()
         );
-        assert!(parse(&missing_location).unwrap_err().contains("path"));
+        assert!(parse(&missing_location)
+            .unwrap_err()
+            .user_message
+            .contains("path"));
     }
 
     #[test]
@@ -525,6 +599,24 @@ mod tests {
             "{HEADER}\n# meta {}\n## file \"chapters/a.snbt\"\n@ {{\"file\":\"chapters/b.snbt\",\"entry_id\":\"b:0:title\",\"path\":\"$\",\"status\":\"translated\"}}\n\"B\" -> \"乙\"\n",
             serde_json::to_string(&document().meta).unwrap()
         );
-        assert!(parse(&content).unwrap_err().contains("## file"));
+        assert!(parse(&content)
+            .unwrap_err()
+            .user_message
+            .contains("## file"));
+    }
+
+    #[test]
+    fn parse_and_load_errors_keep_cmp_category_and_internal_context() {
+        let parse_error = parse("not a cmp").unwrap_err();
+        assert_eq!(parse_error.code, crate::error::ErrorCode::CmpInvalid);
+        assert!(!parse_error.retryable);
+        assert!(!parse_error.task_book_modified);
+
+        let dir = tempdir().unwrap();
+        let missing = dir.path().join("missing.cmp");
+        let load_error = load(&missing).unwrap_err();
+        assert_eq!(load_error.code, crate::error::ErrorCode::CmpInvalid);
+        assert!(load_error.user_message.contains("无法读取 CMP 校对文件"));
+        assert!(!load_error.internal_message.is_empty());
     }
 }

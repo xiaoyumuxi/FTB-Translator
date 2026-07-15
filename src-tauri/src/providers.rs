@@ -1,4 +1,8 @@
-use crate::{logging, storage::Settings};
+use crate::{
+    error::{AppError, AppResult},
+    logging,
+    storage::Settings,
+};
 use reqwest::{header, Client, Response, StatusCode};
 use serde_json::{json, Map, Value};
 use std::{collections::HashMap, time::Duration};
@@ -35,12 +39,28 @@ pub async fn request(
     settings: &Settings,
     batch: &[(String, String)],
     task_id: &str,
-) -> Result<HashMap<String, String>, String> {
-    match normalize(&settings.provider)? {
+) -> AppResult<HashMap<String, String>> {
+    let provider = normalize(&settings.provider).map_err(|message| {
+        AppError::invalid_input(
+            message.clone(),
+            format!("provider configuration: {message}"),
+        )
+    })?;
+    let result = match provider {
         DEEPL => request_deepl(client, settings, batch, task_id).await,
         GOOGLE_WEB => request_google(client, settings, batch, task_id).await,
         DEEPL_WEB => request_deepl_web(client, settings, batch, task_id).await,
         _ => request_openai(client, settings, batch, task_id).await,
+    };
+    result.map_err(classify_request_error)
+}
+
+fn classify_request_error(message: String) -> AppError {
+    let normalized = message.to_ascii_lowercase();
+    if message.contains("HTTP 429") || normalized.contains("rate limit") {
+        AppError::rate_limited(message.clone(), message)
+    } else {
+        AppError::provider_failed(message.clone(), message)
     }
 }
 
@@ -512,6 +532,19 @@ mod tests {
     fn parses_fenced_openai_json() {
         let map = parse_json_map("```json\n{\"a\":\"甲\"}\n```").unwrap();
         assert_eq!(map["a"], "甲");
+    }
+
+    #[test]
+    fn provider_errors_distinguish_rate_limits_from_other_failures() {
+        let rate_limit = classify_request_error("HTTP 429 Too Many Requests: quota".into());
+        assert_eq!(rate_limit.code, crate::error::ErrorCode::RateLimited);
+        assert!(rate_limit.retryable);
+        assert!(!rate_limit.task_book_modified);
+
+        let provider = classify_request_error("HTTP 503 Service Unavailable".into());
+        assert_eq!(provider.code, crate::error::ErrorCode::ProviderFailed);
+        assert!(provider.retryable);
+        assert_eq!(provider.user_message, "HTTP 503 Service Unavailable");
     }
 
     #[test]

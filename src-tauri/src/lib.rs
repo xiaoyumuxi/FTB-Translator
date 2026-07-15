@@ -1,6 +1,7 @@
 mod chapters;
 mod cmp;
 mod core;
+mod error;
 mod glossary;
 mod logging;
 mod providers;

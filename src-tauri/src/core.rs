@@ -1,6 +1,8 @@
 use crate as crate_root;
 use crate::{
-    chapters, cmp, glossary, logging, providers, rich_text,
+    chapters, cmp,
+    error::{AppError, AppResult, ErrorCode},
+    glossary, logging, providers, rich_text,
     snbt::{self, LangValue},
     storage::{History, Settings},
 };
@@ -459,20 +461,33 @@ fn source_fingerprint(entries: &[Entry]) -> String {
     hex::encode(hash.finalize())
 }
 
-fn validate_cmp_identity(
-    document: &cmp::Document,
-    quests_dir: &Path,
-    mode: &str,
-) -> Result<(), String> {
-    let current = quests_dir.canonicalize().map_err(|e| e.to_string())?;
+fn validate_cmp_identity(document: &cmp::Document, quests_dir: &Path, mode: &str) -> AppResult<()> {
+    let current = quests_dir.canonicalize().map_err(|error| {
+        AppError::cmp_invalid(error.to_string(), format!("quests directory: {error}"))
+    })?;
     let recorded = PathBuf::from(&document.meta.quests_dir)
         .canonicalize()
-        .map_err(|e| format!("CMP 中的任务书目录不可用：{e}"))?;
+        .map_err(|error| {
+            AppError::cmp_invalid(
+                format!("CMP 中的任务书目录不可用：{error}"),
+                error.to_string(),
+            )
+        })?;
     if recorded != current {
-        return Err("CMP 不属于当前扫描的任务书目录".into());
+        return Err(AppError::cmp_invalid(
+            "CMP 不属于当前扫描的任务书目录",
+            format!(
+                "recorded={} current={}",
+                recorded.display(),
+                current.display()
+            ),
+        ));
     }
     if document.meta.mode != mode {
-        return Err("CMP 的任务书模式与当前目录不一致".into());
+        return Err(AppError::cmp_invalid(
+            "CMP 的任务书模式与当前目录不一致",
+            format!("recorded={} current={mode}", document.meta.mode),
+        ));
     }
     Ok(())
 }
@@ -483,15 +498,25 @@ fn validate_cmp_source(
     mode: &str,
     entries: &[Entry],
     items: &[Item],
-) -> Result<(), String> {
+) -> AppResult<()> {
     validate_cmp_identity(document, quests_dir, mode)?;
     if document.meta.total_entries != entries.len()
         || document.meta.source_fingerprint != source_fingerprint(entries)
     {
-        return Err("任务书内容在 CMP 生成后发生了变化，请重新扫描并翻译".into());
+        return Err(AppError::source_changed(
+            "任务书内容在 CMP 生成后发生了变化，请重新扫描并翻译",
+            "CMP entry count or source fingerprint differs from the current task book",
+        ));
     }
     if document.records.len() != items.len() {
-        return Err("CMP 翻译条目数量与当前任务书不一致".into());
+        return Err(AppError::cmp_invalid(
+            "CMP 翻译条目数量与当前任务书不一致",
+            format!(
+                "cmp_records={} current_items={}",
+                document.records.len(),
+                items.len()
+            ),
+        ));
     }
     let expected = items
         .iter()
@@ -500,15 +525,20 @@ fn validate_cmp_source(
     for record in &document.records {
         let item = expected
             .get(&(record.entry_id.as_str(), record.path.as_str()))
-            .ok_or_else(|| format!("CMP 包含未知回填位置：{} {}", record.entry_id, record.path))?;
+            .ok_or_else(|| {
+                let message = format!("CMP 包含未知回填位置：{} {}", record.entry_id, record.path);
+                AppError::cmp_invalid(message.clone(), message)
+            })?;
         if record.file != entry_source_file(mode, &record.entry_id) {
-            return Err(format!("CMP 文件归属被修改：{}", record.entry_id));
+            let message = format!("CMP 文件归属被修改：{}", record.entry_id);
+            return Err(AppError::cmp_invalid(message.clone(), message));
         }
         if record.source != item.source {
-            return Err(format!(
+            let message = format!(
                 "CMP 英文原文被修改：{} {}。只允许修改箭头右侧中文",
                 record.entry_id, record.path
-            ));
+            );
+            return Err(AppError::cmp_invalid(message.clone(), message));
         }
     }
     Ok(())
@@ -574,8 +604,8 @@ fn cmp_records(
         .collect()
 }
 
-fn request_failure_status(error: &str) -> &'static str {
-    if error.contains("HTTP 429") || error.to_ascii_lowercase().contains("rate limit") {
+fn request_failure_status(error: &AppError) -> &'static str {
+    if error.code == ErrorCode::RateLimited {
         "rate_limited"
     } else {
         "request_failed"
@@ -656,9 +686,11 @@ fn save_cache(q: &Path, c: &HashMap<String, String>) -> Result<(), String> {
     fs::create_dir_all(p.parent().unwrap()).map_err(|e| e.to_string())?;
     fs::write(p, serde_json::to_vec_pretty(c).unwrap()).map_err(|e| e.to_string())
 }
-fn backup(q: &Path, m: &str) -> Result<PathBuf, String> {
+fn backup(q: &Path, m: &str) -> AppResult<PathBuf> {
     let parent = q.join(".ftb-translater/backups");
-    fs::create_dir_all(&parent).map_err(|e| e.to_string())?;
+    fs::create_dir_all(&parent).map_err(|error| {
+        AppError::backup_failed(error.to_string(), format!("{}: {error}", parent.display()))
+    })?;
     let timestamp = Local::now().format("%Y%m%d-%H%M%S").to_string();
     let root = (0..1000)
         .find_map(|attempt| {
@@ -671,19 +703,30 @@ fn backup(q: &Path, m: &str) -> Result<PathBuf, String> {
             match fs::create_dir(&candidate) {
                 Ok(()) => Some(Ok(candidate)),
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => None,
-                Err(error) => Some(Err(error.to_string())),
+                Err(error) => Some(Err(AppError::backup_failed(
+                    error.to_string(),
+                    format!("{}: {error}", candidate.display()),
+                ))),
             }
         })
-        .ok_or("无法创建唯一备份目录")??;
+        .ok_or_else(|| {
+            AppError::backup_failed("无法创建唯一备份目录", parent.display().to_string())
+        })??;
     let name = if m == "lang" { "lang" } else { "chapters" };
     for e in WalkDir::new(q.join(name)) {
-        let e = e.map_err(|e| e.to_string())?;
+        let e = e.map_err(|error| {
+            AppError::backup_failed(error.to_string(), format!("walk backup tree: {error}"))
+        })?;
         let rel = e.path().strip_prefix(q.join(name)).unwrap();
         let dest = root.join(name).join(rel);
         if e.file_type().is_dir() {
-            fs::create_dir_all(&dest).map_err(|e| e.to_string())?
+            fs::create_dir_all(&dest).map_err(|error| {
+                AppError::backup_failed(error.to_string(), format!("{}: {error}", dest.display()))
+            })?
         } else {
-            fs::copy(e.path(), dest).map_err(|e| e.to_string())?;
+            fs::copy(e.path(), &dest).map_err(|error| {
+                AppError::backup_failed(error.to_string(), format!("{}: {error}", dest.display()))
+            })?;
         }
     }
     Ok(root)
@@ -707,7 +750,7 @@ fn restore_outputs(snapshots: &[(PathBuf, Option<Vec<u8>>)]) -> Vec<String> {
         })
         .collect()
 }
-fn commit_outputs(outputs: &[FileOutput], task_id: &str) -> Result<(), String> {
+fn commit_outputs(outputs: &[FileOutput], task_id: &str) -> AppResult<()> {
     let snapshots = outputs
         .iter()
         .map(|output| match fs::read(&output.path) {
@@ -715,7 +758,10 @@ fn commit_outputs(outputs: &[FileOutput], task_id: &str) -> Result<(), String> {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 Ok((output.path.clone(), None))
             }
-            Err(error) => Err(format!("无法读取 {}：{error}", output.path.display())),
+            Err(error) => {
+                let message = format!("无法读取 {}：{error}", output.path.display());
+                Err(AppError::commit_failed(message.clone(), message, false))
+            }
         })
         .collect::<Result<Vec<_>, _>>()?;
     for (index, output) in outputs.iter().enumerate() {
@@ -739,9 +785,14 @@ fn commit_outputs(outputs: &[FileOutput], task_id: &str) -> Result<(), String> {
             } else {
                 format!("恢复失败：{}", rollback_errors.join("；"))
             };
-            return Err(format!(
-                "无法写入 {}：{error}；{rollback}",
-                output.path.display()
+            let message = format!("无法写入 {}：{error}；{rollback}", output.path.display());
+            return Err(AppError::commit_failed(
+                message,
+                format!(
+                    "write failed: {error}; rollback errors: {}",
+                    rollback_errors.join("; ")
+                ),
+                !rollback_errors.is_empty(),
             ));
         }
     }
@@ -752,7 +803,7 @@ async fn request(
     s: &Settings,
     batch: &[Item],
     task_id: &str,
-) -> Result<HashMap<String, String>, String> {
+) -> AppResult<HashMap<String, String>> {
     let input = batch
         .iter()
         .map(|x| (x.id.clone(), x.protected.clone()))
@@ -1219,7 +1270,7 @@ pub fn apply_cmp(data_dir: &Path, payload: &Value) -> Result<Value, String> {
                 "CMP 校对文件读取或解析失败",
                 json!({"task_id":operation_id,"cmp_path":cmp_path,"error":error}),
             );
-            return Err(error);
+            return Err(error.into());
         }
     };
     let task_id = if document.meta.task_id.trim().is_empty() {
@@ -1256,7 +1307,7 @@ pub fn apply_cmp(data_dir: &Path, payload: &Value) -> Result<Value, String> {
             json!({"task_id":task_id,"cmp_path":cmp_path,"phase":phase.get(),"error":error}),
         );
     }
-    result
+    result.map_err(String::from)
 }
 
 fn apply_cmp_inner(
@@ -1266,10 +1317,19 @@ fn apply_cmp_inner(
     document: cmp::Document,
     task_id: &str,
     phase: &std::cell::Cell<&str>,
-) -> Result<Value, String> {
-    let selected = Path::new(payload["quests_dir"].as_str().ok_or("缺少任务书目录")?);
-    let q = resolve(selected)?;
-    let m = mode(&q)?;
+) -> AppResult<Value> {
+    let selected = Path::new(payload["quests_dir"].as_str().ok_or_else(|| {
+        AppError::invalid_input(
+            "缺少任务书目录",
+            "quests_dir is missing from CMP apply payload",
+        )
+    })?);
+    let q = resolve(selected).map_err(|message| {
+        AppError::invalid_input(message.clone(), format!("resolve task book: {message}"))
+    })?;
+    let m = mode(&q).map_err(|message| {
+        AppError::invalid_input(message.clone(), format!("detect task book mode: {message}"))
+    })?;
     validate_cmp_identity(&document, &q, m)?;
 
     let mut entries = Vec::new();
@@ -1277,7 +1337,12 @@ fn apply_cmp_inner(
     let mut lang = None;
     let mut chapter_segs = Vec::new();
     if m == "lang" {
-        let map = snbt::load(&q.join("lang/en_us.snbt"))?;
+        let map = snbt::load(&q.join("lang/en_us.snbt")).map_err(|message| {
+            AppError::source_changed(
+                message.clone(),
+                format!("reload source language: {message}"),
+            )
+        })?;
         for (entry_index, (key, value)) in map.iter().enumerate() {
             let source = match value {
                 LangValue::Text(value) => value.clone(),
@@ -1291,7 +1356,9 @@ fn apply_cmp_inner(
     } else {
         let mut entry_index = 0;
         for file in chapters::files(&q) {
-            for segment in chapters::extract(&file)? {
+            for segment in chapters::extract(&file).map_err(|message| {
+                AppError::source_changed(message.clone(), format!("reload chapter: {message}"))
+            })? {
                 let (entry, entry_items) = prepare_entry(
                     segment.cache_id.clone(),
                     segment.source.clone(),
@@ -1308,10 +1375,20 @@ fn apply_cmp_inner(
     if document.meta.total_entries != entries.len()
         || document.meta.source_fingerprint != source_fingerprint(&entries)
     {
-        return Err("任务书内容在 CMP 生成后发生了变化，请重新扫描并翻译".into());
+        return Err(AppError::source_changed(
+            "任务书内容在 CMP 生成后发生了变化，请重新扫描并翻译",
+            "CMP entry count or source fingerprint differs from the current task book",
+        ));
     }
     if document.records.len() != items.len() {
-        return Err("CMP 翻译条目数量与当前任务书不一致".into());
+        return Err(AppError::cmp_invalid(
+            "CMP 翻译条目数量与当前任务书不一致",
+            format!(
+                "cmp_records={} current_items={}",
+                document.records.len(),
+                items.len()
+            ),
+        ));
     }
 
     let expected = items
@@ -1323,34 +1400,38 @@ fn apply_cmp_inner(
     for record in &document.records {
         let item = expected
             .get(&(record.entry_id.as_str(), record.path.as_str()))
-            .ok_or_else(|| format!("CMP 包含未知回填位置：{} {}", record.entry_id, record.path))?;
+            .ok_or_else(|| {
+                let message = format!("CMP 包含未知回填位置：{} {}", record.entry_id, record.path);
+                AppError::cmp_invalid(message.clone(), message)
+            })?;
         let expected_file = entry_source_file(m, &record.entry_id);
         if record.file != expected_file {
-            return Err(format!(
+            let message = format!(
                 "CMP 文件归属被修改：{} 应属于 {}",
                 record.entry_id, expected_file
-            ));
+            );
+            return Err(AppError::cmp_invalid(message.clone(), message));
         }
         if record.source != item.source {
-            return Err(format!(
+            let message = format!(
                 "CMP 英文原文被修改：{} {}。只允许修改箭头右侧中文",
                 record.entry_id, record.path
-            ));
+            );
+            return Err(AppError::cmp_invalid(message.clone(), message));
         }
         if record.target.trim().is_empty() {
-            return Err(format!(
-                "CMP 译文不能为空：{} {}",
-                record.entry_id, record.path
-            ));
+            let message = format!("CMP 译文不能为空：{} {}", record.entry_id, record.path);
+            return Err(AppError::cmp_invalid(message.clone(), message));
         }
         let problems = warnings(&record.source, &record.target);
         if !problems.is_empty() {
-            return Err(format!(
+            let message = format!(
                 "CMP 译文未通过格式守卫：{} {}（{}）",
                 record.entry_id,
                 record.path,
                 problems.join("；")
-            ));
+            );
+            return Err(AppError::format_guard_rejected(message.clone(), message));
         }
         if record.status != "translated" && record.target == record.source {
             pending_reviews.insert(record.entry_id.clone());
@@ -1358,7 +1439,10 @@ fn apply_cmp_inner(
         unit_targets.insert(item.id.clone(), record.target.clone());
     }
     if unit_targets.len() != items.len() {
-        return Err("CMP 缺少一个或多个回填位置".into());
+        return Err(AppError::cmp_invalid(
+            "CMP 缺少一个或多个回填位置",
+            format!("targets={} items={}", unit_targets.len(), items.len()),
+        ));
     }
 
     let mut results = HashMap::new();
@@ -1374,14 +1458,17 @@ fn apply_cmp_inner(
             );
             continue;
         }
-        let target = render_entry(entry, &unit_targets)?;
+        let target = render_entry(entry, &unit_targets).map_err(|message| {
+            AppError::cmp_invalid(message.clone(), format!("render CMP entry: {message}"))
+        })?;
         let problems = warnings(&entry.source, &target);
         if !problems.is_empty() {
-            return Err(format!(
+            let message = format!(
                 "CMP 回填后的完整条目未通过格式守卫：{}（{}）",
                 entry.id,
                 problems.join("；")
-            ));
+            );
+            return Err(AppError::format_guard_rejected(message.clone(), message));
         }
         if pending_reviews.contains(&entry.id) {
             report_warnings.insert(
@@ -1410,7 +1497,12 @@ fn apply_cmp_inner(
         }
         let target = q.join("lang/zh_cn.snbt");
         let content = snbt::dump(&map);
-        snbt::parse(&content)?;
+        snbt::parse(&content).map_err(|message| {
+            AppError::format_guard_rejected(
+                message.clone(),
+                format!("rendered language SNBT is invalid: {message}"),
+            )
+        })?;
         pending_outputs.push(FileOutput {
             path: target.clone(),
             archive_name: "lang/zh_cn.snbt".into(),
@@ -1426,7 +1518,13 @@ fn apply_cmp_inner(
                 .push((segment.index, results[&segment.cache_id].clone()));
         }
         for (file, replacements) in by_file {
-            let (content, _) = chapters::render_replacements(&file, &replacements)?;
+            let (content, _) =
+                chapters::render_replacements(&file, &replacements).map_err(|message| {
+                    AppError::format_guard_rejected(
+                        message.clone(),
+                        format!("rendered chapter SNBT is invalid: {message}"),
+                    )
+                })?;
             pending_outputs.push(FileOutput {
                 archive_name: format!("chapters/{}", file.file_name().unwrap().to_string_lossy()),
                 path: file,
@@ -1516,10 +1614,19 @@ fn apply_cmp_inner(
         warnings: report_warnings,
         failed_translations: details,
     };
-    let report_value = serde_json::to_value(&report).map_err(|e| e.to_string())?;
-    let run_id = match History::new(data_dir)
-        .and_then(|history| history.insert(&q, m, &settings, &report_value, &outputs))
-    {
+    let report_value = serde_json::to_value(&report)
+        .map_err(|error| AppError::commit_failed(error.to_string(), error.to_string(), true))?;
+    let history_result = match History::new(data_dir) {
+        Ok(history) => history
+            .insert(&q, m, &settings, &report_value, &outputs)
+            .map_err(|error| error.with_task_book_modified(true)),
+        Err(message) => Err(AppError::history_save_failed(
+            message.clone(),
+            message,
+            true,
+        )),
+    };
+    let run_id = match history_result {
         Ok(run_id) => run_id,
         Err(error) => {
             logging::warn(
@@ -1849,24 +1956,40 @@ mod tests {
             &items,
         )
         .unwrap();
-        assert!(validate_cmp_source(
+        let wrong_pack = validate_cmp_source(
             &document,
             &other,
             "lang",
             std::slice::from_ref(&entry),
-            &items
+            &items,
         )
-        .is_err());
+        .unwrap_err();
+        assert_eq!(wrong_pack.code, ErrorCode::CmpInvalid);
 
-        document.records[0].source = "Changed".into();
-        assert!(validate_cmp_source(
+        document.meta.source_fingerprint = "changed".into();
+        let changed = validate_cmp_source(
             &document,
             &quests,
             "lang",
             std::slice::from_ref(&entry),
-            &items
+            &items,
         )
-        .is_err());
+        .unwrap_err();
+        assert_eq!(changed.code, ErrorCode::SourceChanged);
+        assert!(!changed.retryable);
+        assert!(!changed.task_book_modified);
+
+        document.meta.source_fingerprint = source_fingerprint(std::slice::from_ref(&entry));
+        document.records[0].source = "Changed".into();
+        let changed_english = validate_cmp_source(
+            &document,
+            &quests,
+            "lang",
+            std::slice::from_ref(&entry),
+            &items,
+        )
+        .unwrap_err();
+        assert_eq!(changed_english.code, ErrorCode::CmpInvalid);
     }
 
     #[test]
@@ -1946,8 +2069,56 @@ mod tests {
             },
         ];
 
-        assert!(commit_outputs(&outputs, "test-task").is_err());
+        let error = commit_outputs(&outputs, "test-task").unwrap_err();
+        assert_eq!(error.code, ErrorCode::CommitFailed);
+        assert!(!error.task_book_modified);
+        assert!(error.user_message.contains("已恢复此前写入的文件"));
         assert_eq!(fs::read_to_string(first).unwrap(), "original");
+    }
+
+    #[test]
+    fn backup_failures_are_structured_before_writeback() {
+        let directory = tempdir().unwrap();
+        let quests = directory.path().join("quests");
+        fs::create_dir_all(quests.join("lang")).unwrap();
+        fs::write(quests.join("lang/en_us.snbt"), "{a: \"A\"}").unwrap();
+        fs::write(quests.join(".ftb-translater"), "blocks backup directory").unwrap();
+
+        let error = backup(&quests, "lang").unwrap_err();
+        assert_eq!(error.code, ErrorCode::BackupFailed);
+        assert!(error.retryable);
+        assert!(!error.task_book_modified);
+    }
+
+    #[test]
+    fn cmp_format_guard_error_is_structured_and_writes_nothing() {
+        let directory = tempdir().unwrap();
+        let quests = directory.path().join("config/ftbquests/quests");
+        fs::create_dir_all(quests.join("lang")).unwrap();
+        fs::write(
+            quests.join("lang/en_us.snbt"),
+            r#"{ title: "Use §aGreen" }"#,
+        )
+        .unwrap();
+        let cmp_path = directory.path().join("review.cmp");
+        write_test_cmp(&cmp_path, &quests, "Use §aGreen", "Use §aGreen", "使用绿色");
+        let document = cmp::load(&cmp_path).unwrap();
+        let phase = std::cell::Cell::new("validation");
+        let error = apply_cmp_inner(
+            &directory.path().join("app-data"),
+            &json!({"cmp_path":cmp_path,"quests_dir":quests.display().to_string()}),
+            cmp_path,
+            document,
+            "test-task",
+            &phase,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::FormatGuardRejected);
+        assert!(!error.retryable);
+        assert!(!error.task_book_modified);
+        assert!(!quests.join("lang/zh_cn.snbt").exists());
+        assert!(!quests.join(".ftb-translater/backups").exists());
     }
 
     #[test]

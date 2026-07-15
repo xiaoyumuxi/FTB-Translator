@@ -1,3 +1,4 @@
+use crate::error::{AppError, AppResult};
 use chrono::Local;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
@@ -305,15 +306,20 @@ impl History {
         settings: &Settings,
         report: &Value,
         outputs: &[(String, String, Value)],
-    ) -> Result<i64, String> {
-        let mut c = self.conn()?;
-        let tx = c.transaction().map_err(|e| e.to_string())?;
-        tx.execute("INSERT INTO translation_runs(quests_dir,pack_name,mode,model,style,total_entries,translated_entries,cache_hits,failed_count,warning_count,created_at)VALUES(?,?,?,?,?,?,?,?,?,?,?)",params![quests.display().to_string(),pack_name(quests),mode,settings.model,settings.style,report["total_entries"].as_i64(),report["translated_entries"].as_i64(),report["cache_hits"].as_i64(),report["failed_entries"].as_array().map_or(0,Vec::len)as i64,report["warnings"].as_object().map_or(0,|x|x.len())as i64,Local::now().to_rfc3339()]).map_err(|e|e.to_string())?;
+    ) -> AppResult<i64> {
+        let history_error =
+            |message: String| AppError::history_save_failed(message.clone(), message, false);
+        let mut c = self.conn().map_err(history_error)?;
+        let tx = c
+            .transaction()
+            .map_err(|error| history_error(error.to_string()))?;
+        tx.execute("INSERT INTO translation_runs(quests_dir,pack_name,mode,model,style,total_entries,translated_entries,cache_hits,failed_count,warning_count,created_at)VALUES(?,?,?,?,?,?,?,?,?,?,?)",params![quests.display().to_string(),pack_name(quests),mode,settings.model,settings.style,report["total_entries"].as_i64(),report["translated_entries"].as_i64(),report["cache_hits"].as_i64(),report["failed_entries"].as_array().map_or(0,Vec::len)as i64,report["warnings"].as_object().map_or(0,|x|x.len())as i64,Local::now().to_rfc3339()]).map_err(|error|history_error(error.to_string()))?;
         let id = tx.last_insert_rowid();
         for (name, content, map) in outputs {
-            tx.execute("INSERT INTO translation_files(run_id,filename,mapping,output_content)VALUES(?,?,?,?)",params![id,name,map.to_string(),content]).map_err(|e|e.to_string())?;
+            tx.execute("INSERT INTO translation_files(run_id,filename,mapping,output_content)VALUES(?,?,?,?)",params![id,name,map.to_string(),content]).map_err(|error|history_error(error.to_string()))?;
         }
-        tx.commit().map_err(|e| e.to_string())?;
+        tx.commit()
+            .map_err(|error| history_error(error.to_string()))?;
         crate::logging::info(
             "history",
             "history_inserted",
@@ -544,5 +550,32 @@ mod tests {
         assert!(archive.is_file());
         history.delete(id).unwrap();
         assert!(history.list().unwrap().as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn history_insert_failure_is_structured_without_assuming_writeback() {
+        let directory = tempdir().unwrap();
+        let history = History {
+            path: directory.path().to_path_buf(),
+        };
+        let error = history
+            .insert(
+                Path::new("/packs/demo/config/ftbquests/quests"),
+                "lang",
+                &Settings::default(),
+                &json!({
+                    "total_entries": 0,
+                    "translated_entries": 0,
+                    "cache_hits": 0,
+                    "failed_entries": [],
+                    "warnings": {}
+                }),
+                &[],
+            )
+            .unwrap_err();
+        assert_eq!(error.code, crate::error::ErrorCode::HistorySaveFailed);
+        assert!(error.retryable);
+        assert!(!error.task_book_modified);
+        assert!(!error.internal_message.is_empty());
     }
 }

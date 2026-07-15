@@ -4,6 +4,8 @@
 mod chapters;
 #[path = "../src/cmp.rs"]
 mod cmp;
+#[path = "../src/error.rs"]
+mod error;
 #[path = "../src/glossary.rs"]
 mod glossary;
 #[path = "../src/logging.rs"]
@@ -325,7 +327,9 @@ mod application {
             ];
 
             let error = commit_outputs(&outputs, "fixture-rollback").unwrap_err();
-            assert!(error.contains("已恢复此前写入的文件"));
+            assert_eq!(error.code, ErrorCode::CommitFailed);
+            assert!(error.user_message.contains("已恢复此前写入的文件"));
+            assert!(!error.task_book_modified);
             assert_eq!(
                 fs::read(&first).unwrap(),
                 fs::read(fixture.join("expected/first.snbt")).unwrap()
