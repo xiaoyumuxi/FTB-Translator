@@ -224,6 +224,17 @@ API 返回后，每条译文经过两步处理：
 
 ---
 
+## 维护者文档
+
+- [架构概览](docs/architecture.md)：模块边界、数据模型、持久化位置与系统不变量
+- [翻译流水线](docs/translation-pipeline.md)：扫描、保护、缓存、提供商调用、CMP 生成与限流重试
+- [CMP 写回事务](docs/writeback-transaction.md)：重新验证、备份、提交、回滚与提交后告警
+- [测试策略](docs/testing-strategy.md)：现有覆盖、最低门禁、离线测试方向与已知缺口
+- [架构决策记录（ADR）](docs/architecture.md#决策索引)：SNBT 解析、颜色码、Tauri 迁移、CMP 和限流一致性
+- [CMP v1 格式规范](docs/cmp-format.md) · [诊断日志规范](docs/logging.md) · [当前行为基线](docs/current-baseline.md)
+
+---
+
 ## 数据位置
 
 应用设置、可编辑的默认 `minecraft_glossary.json` 和历史数据库保存到系统应用数据目录（`AppData`/`Application Support`/`~/.local/share`）。
