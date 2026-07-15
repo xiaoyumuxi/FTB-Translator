@@ -21,6 +21,8 @@ mod snbt;
 #[path = "../src/storage.rs"]
 mod storage;
 
+// Compile the production façade and its path-based child modules so the offline
+// golden pipeline always exercises the real scan/protection/review/writeback code.
 mod application {
     include!("../src/core.rs");
 
@@ -337,6 +339,33 @@ mod application {
                 fs::read(fixture.join("expected/first.snbt")).unwrap()
             );
             assert!(!missing_second.exists());
+        }
+
+        #[test]
+        fn backend_module_boundaries_exclude_forbidden_dependencies() {
+            let writeback = include_str!("../src/core/writeback.rs");
+            assert!(
+                !writeback.contains("providers::"),
+                "writeback must not call translation providers"
+            );
+
+            let translation = include_str!("../src/core/translation.rs");
+            assert!(
+                !translation.contains("commit_outputs") && !translation.contains("backup("),
+                "translation must not commit or back up task-book files"
+            );
+
+            let review = include_str!("../src/core/review.rs");
+            assert!(
+                !review.contains("commit_outputs") && !review.contains("backup("),
+                "review must not commit or back up task-book files"
+            );
+
+            let provider = include_str!("../src/providers.rs");
+            assert!(
+                !provider.contains("cmp::"),
+                "providers must not parse or write CMP documents"
+            );
         }
     }
 }
