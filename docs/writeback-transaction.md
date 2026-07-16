@@ -21,7 +21,7 @@
 应用不会相信生成 CMP 时留在内存里的扫描结果。它重新读取 `lang/en_us.snbt` 或排序后的 `chapters/*.snbt`，用与翻译阶段相同的 `prepare_entry` 规则重建条目和富文本单元，然后比较：
 
 1. `total_entries`；
-2. 由条目 ID、NUL 分隔符、完整英文和 `0xff` 分隔符计算的 SHA-256 `source_fingerprint`；
+2. 新 CMP 使用覆盖解析管线版本、源文件相对路径、完整文件字节和提取条目身份的 `v2` SHA-256 `source_fingerprint`；旧 v1 的条目 ID/英文指纹继续兼容；
 3. CMP 记录数与当前翻译单元数；
 4. 每个 `(entry_id, path)` 是否存在且唯一；
 5. `file` 是否由当前模式和条目 ID 推导得到；

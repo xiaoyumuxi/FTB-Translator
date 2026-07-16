@@ -65,7 +65,9 @@ export function WorkbenchPage(props: WorkbenchPageProps) {
     done: 3,
     error: props.scan ? 1 : 0,
   }[props.stage];
-  const rateLimitedCount = props.cmpEntries.filter((entry) => entry.status === "rate_limited").length;
+  const rateLimitedCount = props.cmpEntries.filter(
+    (entry) => entry.status === "rate_limited" && entry.target === entry.source,
+  ).length;
 
   return (
     <div className="page workbench-page">
@@ -121,18 +123,19 @@ export function WorkbenchPage(props: WorkbenchPageProps) {
           <div className="path-control">
             <input
               value={props.path}
+              disabled={props.busy}
               onChange={(event) => props.setPath(event.target.value)}
               placeholder="选择一个整合包目录…"
               onKeyDown={(event) => event.key === "Enter" && props.onScan()}
             />
-            <button className="secondary" onClick={props.onChoose}>
+            <button className="secondary" disabled={props.busy} onClick={props.onChoose}>
               <FolderOpen />选择目录
             </button>
           </div>
           {props.scan ? (
             <ScanSummary scan={props.scan} />
           ) : (
-            <div className="drop-hint" onClick={props.onChoose}>
+            <div className="drop-hint" onClick={() => !props.busy && props.onChoose()}>
               <FileSearch />
               <div>
                 <strong>从扫描开始</strong>
@@ -157,10 +160,10 @@ export function WorkbenchPage(props: WorkbenchPageProps) {
             <>
               <h2>生成校对文件</h2>
               <p>API 翻译完成后先生成 CMP，确认之前不会修改任务书。</p>
-              <button className="primary wide" onClick={props.onTranslate}>
+              <button className="primary wide" disabled={props.busy} onClick={props.onTranslate}>
                 <Play />开始翻译<ArrowRight />
               </button>
-              <button className="text-button" onClick={props.onChooseCmp}>
+              <button className="text-button" disabled={props.busy} onClick={props.onChooseCmp}>
                 <Upload />选择已有 CMP
               </button>
               <button className="text-button" onClick={props.onSettings}>

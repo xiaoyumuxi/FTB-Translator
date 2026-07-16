@@ -32,7 +32,7 @@ React 界面（src/{App,components,services,types}.tsx/ts）
 扫描先把所选目录解析为任务书根目录，并选择一种模式。若同一目录同时存在 `lang/en_us.snbt` 和 `chapters/*.snbt`，当前实现优先使用 `lang`。
 
 - `lang`：`snbt.rs` 解析根 compound，值只接受字符串或字符串数组，使用有序 `Vec` 保持键顺序；写回生成完整 `lang/zh_cn.snbt` 并重新解析。
-- `chapters`：`chapters.rs` 当前用受限正则寻找 `title`、`subtitle`、`description`、`text`、`name` 字段，记录原字符串字面量的字节区间、引号和序号。替换按倒序 span 完成，并在替换前后检查引号、转义和括号结构。它不是通用 SNBT 解析器。
+- `chapters`：`chapters.rs` 使用面向任务的逐字符 token/span walker，跳过注释和字符串内部的伪字段，识别嵌套 compound/list 中的 `title`、`subtitle`、`description`、`text`、`name`，并记录原字面量字节区间、引号和序号。替换按倒序 span 完成，并在替换前后检查引号、转义和括号结构；它仍不是覆盖所有 SNBT 类型的通用 AST。
 - 普通条目进入一个 `$` 翻译单元；可安全解析的 Minecraft JSON 富文本按 JSON Pointer 拆为多个玩家可见单元；疑似富文本但无法安全解析或含重复键时整条保留英文。
 
 翻译单元携带 `entry_id`、`path`、英文原文、保护后的文本和占位符映射。CMP 再加入源文件归属、状态与译文，使每个译文都能回到唯一位置。
@@ -46,7 +46,7 @@ React 界面（src/{App,components,services,types}.tsx/ts）
 
 “直接覆盖”和“人工校对”只是在 UI 中到达应用阶段的方式不同，后端最终都调用相同的 CMP 应用路径。详细流程分别见 [翻译流水线](translation-pipeline.md) 与 [写回事务](writeback-transaction.md)。
 
-后端另以 `created → translating → review_ready → applying → applied` 表示成功路径，操作失败进入 `failed`；未修改任务书的 apply 失败恢复为 `review_ready`。命令在启动异步任务或写回前先原子转换状态，不能只依赖前端按钮防止重复操作。
+后端另以 `created → translating → review_ready → applying → applied` 表示成功路径，操作失败进入 `failed`；未修改任务书的 apply 失败恢复为 `review_ready`。命令在启动异步任务或写回前先原子转换状态，不能只依赖前端按钮防止重复操作。状态诊断会列出活动任务、更新时间以及翻译记录是否早于本次进程：只有旧 `translating` 可在用户确认后标记为中断；本次进程后的翻译视为可能仍存活，`applying` 则始终不自动解锁。
 
 ## 持久化边界
 
@@ -66,7 +66,7 @@ React 界面（src/{App,components,services,types}.tsx/ts）
 
 `providers.rs` 适配 Google 网页、DeepL 网页、DeepL 官方 API 和 OpenAI 兼容接口。API 模式 `auto` 批大小为 25、并发为 6，并发硬上限 12；两个网页提供商的有效并发固定收敛为 1。提供商层负责各自协议、拆分和最多三次递增等待的 HTTP 尝试，核心层负责批次并发、失败状态、恢复、格式守卫和 CMP 汇总。
 
-缓存键包含原文和提供商身份；OpenAI 兼容模式包含模型，其他模式还包含接口地址。开启词表时，词表内容指纹参与缓存键；富文本另带处理管线版本，避免复用旧的整段 JSON 结果。
+缓存键包含原文、提供商、模型和规范化接口地址，避免两个 OpenAI 兼容端点使用同名模型时交叉复用。默认 DeepSeek 地址仍可只读迁移旧缓存，自定义地址不读取旧式键。开启词表时，词表内容指纹参与缓存键；富文本另带处理管线版本，避免复用旧的整段 JSON 结果。
 
 ## 必须保持的不变量
 
@@ -80,10 +80,10 @@ React 界面（src/{App,components,services,types}.tsx/ts）
 
 ## 已知边界与演进方向
 
-- 当前 `chapters` 提取仍依赖受限正则，不等于完整 SNBT token walker。历史 Python 实现曾使用 token span walker；为何不应扩大为“用正则解析所有 SNBT”见 [ADR-001](decisions/001-token-span-over-regex.md)。
-- 历史 Python 格式守卫有轻量颜色/样式 AST；当前 Rust 版只把颜色码当不透明 token 并比较排序后的多重集合，尚不能证明样式作用域等价。见 [ADR-002](decisions/002-colour-ast.md)。
+- `chapters` 已恢复轻量 token/span walker，但仍只理解本工具需要的字段和值边界，不是完整 SNBT AST；新增 typed array 或未知合法语法时仍要补 fixture。见 [ADR-001](decisions/001-token-span-over-regex.md)。
+- Rust 已恢复轻量颜色/样式 AST，并与 token 多重集合共同验证活动样式作用域。见 [ADR-002](decisions/002-colour-ast.md)。
 - 文件提交是应用级补偿事务，不是文件系统原子事务；进程崩溃或回滚自身失败仍需使用已创建的备份人工恢复。
-- 当前已有 Rust 单元测试、临时目录流程测试，以及使用确定性 Mock 响应的 `lang`/`chapters` 扫描→CMP→备份→写回 Golden fixture；尚无前端组件/浏览器测试，异步 HTTP provider 也未通过可注入客户端贯穿 Golden。见 [测试策略](testing-strategy.md)。
+- 当前已有 Rust 单元测试、临时目录流程测试，使用确定性 Mock 响应的 `lang`/`chapters` 扫描→CMP→备份→写回 Golden fixture，以及前端纯逻辑和 SSR 组件测试；尚无真实浏览器交互测试，异步 HTTP provider 也未通过可注入客户端贯穿 Golden。见 [测试策略](testing-strategy.md)。
 
 ## 决策索引
 

@@ -58,6 +58,10 @@ jobs:
           cache: npm
       - name: Install frontend dependencies
         run: npm ci
+      - name: Check version metadata
+        run: npm run check:versions
+      - name: Run frontend logic tests
+        run: npm run test:frontend
       - name: Build frontend
         run: npm run build
 

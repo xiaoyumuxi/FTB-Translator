@@ -1,6 +1,6 @@
 # FTB Translator CMP v1
 # 只修改箭头右侧的中文；保留 @ 行、英文原文、引号与 JSON 转义。
-# meta {"version":1,"task_id":"fixture-chapters-nested","quests_dir":"{{QUESTS_DIR}}","mode":"chapters","source_fingerprint":"67782d86d4d2ebcf25768287ae3c2f47c5558ea46c826f1e55eb855b5f3777a1","provider":"fixture_mock","base_url":"mock://offline","model":"deterministic-v1","style":"fixture","glossary_enabled":false,"glossary_fingerprint":"","total_entries":8,"cache_hits":0}
+# meta {"version":1,"task_id":"fixture-chapters-nested","quests_dir":"{{QUESTS_DIR}}","mode":"chapters","source_fingerprint":"67782d86d4d2ebcf25768287ae3c2f47c5558ea46c826f1e55eb855b5f3777a1","provider":"fixture_mock","base_url":"mock://offline","model":"deterministic-v1","style":"fixture","glossary_enabled":false,"glossary_fingerprint":"","total_entries":8,"cache_hits":0,"protected_hash":"c8310d5a9e20e77d6494bbeddbb9f82423a6ecb61203bf94c1f72944c50cf292"}
 
 ## file "chapters/alpha.snbt"
 

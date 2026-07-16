@@ -64,6 +64,21 @@ fn classify_request_error(message: String) -> AppError {
     }
 }
 
+fn retryable_status(status: StatusCode) -> bool {
+    status == StatusCode::REQUEST_TIMEOUT
+        || status == StatusCode::TOO_MANY_REQUESTS
+        || status.is_server_error()
+}
+
+fn retry_after(response: &Response) -> Option<Duration> {
+    response
+        .headers()
+        .get(header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(|seconds| Duration::from_secs(seconds.min(60)))
+}
+
 async fn request_openai(
     client: &Client,
     s: &Settings,
@@ -87,6 +102,7 @@ async fn request_openai(
     let mut use_response_format = true;
     let mut last = String::new();
     for attempt in 0..3 {
+        let mut wait = Duration::from_millis(800 * (attempt + 1));
         logging::debug(
             "provider",
             "openai_attempt_started",
@@ -106,6 +122,7 @@ async fn request_openai(
         {
             Ok(response) => {
                 let status = response.status();
+                let server_wait = retry_after(&response);
                 let text = response.text().await.unwrap_or_default();
                 if !status.is_success() {
                     logging::warn(
@@ -124,7 +141,13 @@ async fn request_openai(
                         use_response_format = false;
                         continue;
                     }
-                    last = format!("HTTP {status}: {text}");
+                    last = format!("HTTP {status}");
+                    if !retryable_status(status) {
+                        return Err(last);
+                    }
+                    if let Some(server_wait) = server_wait {
+                        wait = server_wait;
+                    }
                 } else {
                     let value: Value = serde_json::from_str(&text)
                         .map_err(|e| format!("OpenAI 兼容接口返回无效 JSON：{e}"))?;
@@ -156,7 +179,7 @@ async fn request_openai(
             }
         }
         if attempt < 2 {
-            tokio::time::sleep(Duration::from_millis(800 * (attempt + 1))).await;
+            tokio::time::sleep(wait).await;
         }
     }
     Err(last)
@@ -421,6 +444,7 @@ where
 {
     let mut last = String::new();
     for attempt in 0..3 {
+        let mut wait = Duration::from_millis(1000 * (attempt + 1));
         logging::debug(
             "provider",
             "http_attempt_started",
@@ -439,14 +463,23 @@ where
             }
             Ok(response) => {
                 let status = response.status();
+                let server_wait = retry_after(&response);
                 logging::warn(
                     "provider",
                     "http_attempt_failed",
                     "翻译接口返回失败状态",
                     json!({"task_id":task_id,"provider":provider,"attempt":attempt + 1,"http_status":status.as_u16()}),
                 );
-                let body = response.text().await.unwrap_or_default();
-                last = format!("HTTP {status}: {body}");
+                // Consume and discard the body so connection reuse still works, but never
+                // propagate third-party response text into application errors or logs.
+                let _ = response.text().await;
+                last = format!("HTTP {status}");
+                if !retryable_status(status) {
+                    return Err(last);
+                }
+                if let Some(server_wait) = server_wait {
+                    wait = server_wait;
+                }
             }
             Err(error) => {
                 logging::warn(
@@ -459,7 +492,7 @@ where
             }
         }
         if attempt < 2 {
-            tokio::time::sleep(Duration::from_millis(1000 * (attempt + 1))).await;
+            tokio::time::sleep(wait).await;
         }
     }
     Err(last)
@@ -545,6 +578,11 @@ mod tests {
         assert_eq!(provider.code, crate::error::ErrorCode::ProviderFailed);
         assert!(provider.retryable);
         assert_eq!(provider.user_message, "HTTP 503 Service Unavailable");
+
+        assert!(retryable_status(StatusCode::TOO_MANY_REQUESTS));
+        assert!(retryable_status(StatusCode::SERVICE_UNAVAILABLE));
+        assert!(!retryable_status(StatusCode::UNAUTHORIZED));
+        assert!(!retryable_status(StatusCode::BAD_REQUEST));
     }
 
     #[test]

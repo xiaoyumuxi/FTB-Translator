@@ -1,5 +1,7 @@
 use crate::error::{AppError, AppResult};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::{collections::HashSet, fs, path::Path};
 
 const HEADER: &str = "# FTB Translator CMP v1";
@@ -62,6 +64,41 @@ pub struct Document {
     pub records: Vec<Record>,
 }
 
+fn hash_field(hash: &mut Sha256, value: &str) {
+    hash.update((value.len() as u64).to_le_bytes());
+    hash.update(value.as_bytes());
+}
+
+/// Covers every CMP field that a human editor is not allowed to change.
+/// The target text is deliberately excluded so normal review edits remain valid.
+pub fn protected_fingerprint(document: &Document) -> String {
+    let mut hash = Sha256::new();
+    hash.update(b"ftb-translator-cmp-protected-v1\0");
+    hash_field(
+        &mut hash,
+        &serde_json::to_string(&document.meta)
+            .expect("CMP metadata contains only values supported by serde_json"),
+    );
+    let mut records = document.records.iter().collect::<Vec<_>>();
+    records.sort_by(|left, right| left.file.cmp(&right.file));
+    for record in records {
+        for value in [
+            record.file.as_str(),
+            record.entry_id.as_str(),
+            record.path.as_str(),
+            record.source.as_str(),
+            record.status.as_str(),
+        ] {
+            hash_field(&mut hash, value);
+        }
+    }
+    hex::encode(hash.finalize())
+}
+
+fn content_revision(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Location {
@@ -78,10 +115,16 @@ pub fn write(path: &Path, document: &Document) -> AppResult<()> {
     output.push('\n');
     output.push_str("# 只修改箭头右侧的中文；保留 @ 行、英文原文、引号与 JSON 转义。\n");
     output.push_str("# meta ");
-    output.push_str(
-        &serde_json::to_string(&document.meta)
+    let mut metadata = serde_json::to_string(&document.meta)
+        .map_err(|error| invalid_with(error.to_string(), error.to_string()))?;
+    metadata.pop();
+    metadata.push_str(",\"protected_hash\":");
+    metadata.push_str(
+        &serde_json::to_string(&protected_fingerprint(document))
             .map_err(|error| invalid_with(error.to_string(), error.to_string()))?,
     );
+    metadata.push('}');
+    output.push_str(&metadata);
     output.push_str("\n\n");
     // CMP file sections are presentation-only, but keeping them in a canonical order
     // makes repeated saves stable. Rust's slice sort is stable, so source order within
@@ -121,11 +164,7 @@ pub fn write(path: &Path, document: &Document) -> AppResult<()> {
         );
         output.push_str("\n\n");
     }
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| invalid_with(error.to_string(), error.to_string()))?;
-    }
-    fs::write(path, output)
+    crate::atomic_file::write(path, output)
         .map_err(|error| invalid_with(format!("无法保存 CMP 校对文件：{error}"), error.to_string()))
 }
 
@@ -152,13 +191,34 @@ fn validate_document(document: &Document) -> AppResult<()> {
 }
 
 pub fn load(path: &Path) -> AppResult<Document> {
-    let content = fs::read_to_string(path).map_err(|error| {
+    load_with_revision(path).map(|(document, _)| document)
+}
+
+pub fn load_with_revision(path: &Path) -> AppResult<(Document, String)> {
+    let bytes = fs::read(path).map_err(|error| {
         invalid_with(
             format!("无法读取 CMP 校对文件 {}：{error}", path.display()),
             error.to_string(),
         )
     })?;
-    parse(&content)
+    let content = std::str::from_utf8(&bytes).map_err(|error| {
+        invalid_with(
+            format!("CMP 校对文件不是有效 UTF-8：{error}"),
+            error.to_string(),
+        )
+    })?;
+    parse(content).map(|document| (document, content_revision(&bytes)))
+}
+
+pub fn revision(path: &Path) -> AppResult<String> {
+    fs::read(path)
+        .map(|bytes| content_revision(&bytes))
+        .map_err(|error| {
+            invalid_with(
+                format!("无法读取 CMP 校对文件 {}：{error}", path.display()),
+                error.to_string(),
+            )
+        })
 }
 
 pub fn parse(content: &str) -> AppResult<Document> {
@@ -169,6 +229,7 @@ pub fn parse(content: &str) -> AppResult<Document> {
         return Err(invalid("CMP 文件头无效或版本不受支持"));
     }
     let mut meta = None;
+    let mut protected_hash = None;
     let mut records = Vec::new();
     let mut locations = HashSet::new();
     let mut current_file = None;
@@ -184,7 +245,30 @@ pub fn parse(content: &str) -> AppResult<Document> {
                     line_index + 1
                 )));
             }
-            let value = serde_json::from_str::<Meta>(raw).map_err(|error| {
+            let mut raw_value = serde_json::from_str::<Value>(raw).map_err(|error| {
+                invalid_with(
+                    format!("CMP 第 {} 行 meta 无效：{error}", line_index + 1),
+                    error.to_string(),
+                )
+            })?;
+            let object = raw_value.as_object_mut().ok_or_else(|| {
+                invalid(format!(
+                    "CMP 第 {} 行 meta 必须是 JSON 对象",
+                    line_index + 1
+                ))
+            })?;
+            protected_hash = object
+                .remove("protected_hash")
+                .map(|value| {
+                    value.as_str().map(str::to_string).ok_or_else(|| {
+                        invalid(format!(
+                            "CMP 第 {} 行 protected_hash 必须是字符串",
+                            line_index + 1
+                        ))
+                    })
+                })
+                .transpose()?;
+            let value = serde_json::from_value::<Meta>(raw_value).map_err(|error| {
                 invalid_with(
                     format!("CMP 第 {} 行 meta 无效：{error}", line_index + 1),
                     error.to_string(),
@@ -266,7 +350,18 @@ pub fn parse(content: &str) -> AppResult<Document> {
     if records.is_empty() {
         return Err(invalid("CMP 文件没有翻译条目"));
     }
-    Ok(Document { meta, records })
+    let document = Document { meta, records };
+    validate_document(&document)?;
+    if let Some(expected) = protected_hash {
+        let actual = protected_fingerprint(&document);
+        if expected != actual {
+            return Err(invalid_with(
+                "CMP 的受保护内容已被修改；只允许编辑箭头右侧译文",
+                format!("protected hash mismatch: expected={expected} actual={actual}"),
+            ));
+        }
+    }
+    Ok(document)
 }
 
 fn parse_pair(line: &str) -> AppResult<(String, String)> {
@@ -491,6 +586,29 @@ mod tests {
     }
 
     #[test]
+    fn protected_hash_rejects_metadata_and_location_edits() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("protected.cmp");
+        write(&path, &document()).unwrap();
+        let original = fs::read_to_string(path).unwrap();
+        assert!(original.contains("\"protected_hash\""));
+
+        let changed_task =
+            original.replace("20260714T120000.000Z-0001", "20260714T120000.000Z-tampered");
+        assert!(parse(&changed_task)
+            .unwrap_err()
+            .user_message
+            .contains("受保护内容"));
+
+        let changed_status =
+            original.replacen("\"status\":\"translated\"", "\"status\":\"review\"", 1);
+        assert!(parse(&changed_status)
+            .unwrap_err()
+            .user_message
+            .contains("受保护内容"));
+    }
+
+    #[test]
     fn rejects_duplicate_locations_and_broken_pairs() {
         let mut content = String::from(HEADER);
         content.push_str("\n# meta ");
@@ -573,12 +691,14 @@ mod tests {
             .user_message
             .contains("provider"));
 
-        let unknown_meta = missing_content.replace(
-            &serde_json::to_string(&missing).unwrap(),
-            &format!(
-                "{{\"future\":true,{}}}",
-                &serde_json::to_string(&document().meta).unwrap()[1..]
-            ),
+        let mut unknown = serde_json::to_value(&document().meta).unwrap();
+        unknown
+            .as_object_mut()
+            .unwrap()
+            .insert("future".into(), serde_json::Value::Bool(true));
+        let unknown_meta = format!(
+            "{HEADER}\n# meta {}\n@ {{\"file\":\"lang/en_us.snbt\",\"entry_id\":\"a\",\"path\":\"$\",\"status\":\"translated\"}}\n\"A\" -> \"甲\"\n",
+            serde_json::to_string(&unknown).unwrap()
         );
         assert!(parse(&unknown_meta)
             .unwrap_err()

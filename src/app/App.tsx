@@ -6,6 +6,7 @@ import { Nav } from "../components/Nav";
 import { QuestMark } from "../components/QuestMark";
 import { useTauriEvents } from "../hooks/useTauriEvents";
 import type { CmpDraft, CmpEntry, CmpValidationReport } from "../models/cmp";
+import { classifyTaskRecovery } from "../lib/taskRecovery";
 import {
   defaultSettings,
   providerOptions,
@@ -24,12 +25,16 @@ import {
 import { HistoryPage } from "../pages/HistoryPage";
 import { SettingsPage } from "../pages/SettingsPage";
 import { WorkbenchPage } from "../pages/WorkbenchPage";
+import type { ActiveTask } from "../models/task";
 import {
   applyCmp as applyCmpCommand,
   call,
+  errorCode,
   errorText,
   frontendLog,
+  inspectTaskState,
   loadCmp,
+  recoverInterruptedTranslation,
   saveCmpTargets,
   scanTask,
   translateTask,
@@ -52,10 +57,15 @@ export function App() {
   const progressDisplayed = useRef({ done: 0, total: 0 });
   const progressTimer = useRef<number | null>(null);
   const retryingRateLimited = useRef(false);
+  const activeTaskId = useRef<string | null>(null);
+  const translationStarting = useRef(false);
+  const scanGeneration = useRef(0);
+  const cmpLoadGeneration = useRef(0);
   const [logs, setLogs] = useState<Activity[]>([]);
   const [report, setReport] = useState<Report | null>(null);
   const [runs, setRuns] = useState<Run[]>([]);
   const [toast, setToast] = useState("");
+  const toastTimer = useRef<number | null>(null);
   const [confirm, setConfirm] = useState(false);
   const [cmpDraft, setCmpDraft] = useState<CmpDraft | null>(null);
   const [cmpEntries, setCmpEntries] = useState<CmpEntry[]>([]);
@@ -88,6 +98,7 @@ export function App() {
       window.removeEventListener("error", onError);
       window.removeEventListener("unhandledrejection", onRejection);
       stopProgressAnimation();
+      if (toastTimer.current !== null) window.clearTimeout(toastTimer.current);
     };
   }, []);
 
@@ -101,9 +112,40 @@ export function App() {
         });
       })
       .catch((error) => notify(errorText(error)));
+    call("logs-info").catch((error) =>
+      notify(`诊断日志不可用：${errorText(error)}`),
+    );
   }, []);
 
   useTauriEvents((event) => {
+    if (event.task_id && activeTaskId.current && event.task_id !== activeTaskId.current) {
+      void frontendLog("debug", "stale_translation_event_ignored", "已忽略其他任务的翻译事件", {
+        active_task_id: activeTaskId.current,
+        event_task_id: event.task_id,
+        event_type: event.type,
+      });
+      return;
+    }
+    if (
+      event.task_id &&
+      !activeTaskId.current &&
+      !translationStarting.current &&
+      stage !== "running"
+    ) {
+      void frontendLog("debug", "orphan_translation_event_ignored", "已忽略当前页面未启动的翻译事件", {
+        event_task_id: event.task_id,
+        event_type: event.type,
+        stage,
+      });
+      return;
+    }
+    if (
+      event.task_id &&
+      !activeTaskId.current &&
+      (translationStarting.current || stage === "running")
+    ) {
+      activeTaskId.current = event.task_id;
+    }
     if (event.type === "log" && event.message) {
       setLogs((value) => [...value.slice(-299), note(event.message!)]);
     }
@@ -140,6 +182,7 @@ export function App() {
         total_entries: event.total_entries || 0,
         warning_count: event.warning_count || 0,
         failed_count: event.failed_count || 0,
+        can_apply: false,
       };
       retryingRateLimited.current = false;
       stopProgressAnimation();
@@ -148,11 +191,14 @@ export function App() {
       setStage("review");
       setCmpDraft(draft);
       setCmpValidation(null);
-      void loadCmpEntries(draft);
-      setReviewPrompt(true);
+      void loadCmpEntries(draft).then((loaded) => {
+        if (loaded) setReviewPrompt(true);
+      });
       setLogs((value) => [...value, note("API 翻译完成，已打开可编辑校对表格，尚未覆盖任务书。")]);
       void frontendLog("info", "cmp_review_ready", "CMP 校对文件已生成", draft);
       notify("翻译完成，请确认是否直接覆盖");
+      activeTaskId.current = null;
+      translationStarting.current = false;
     }
     if (event.type === "done" && event.report) {
       retryingRateLimited.current = false;
@@ -171,6 +217,8 @@ export function App() {
       });
       notify("任务书汉化完成");
       loadHistory();
+      activeTaskId.current = null;
+      translationStarting.current = false;
     }
     if (event.type === "error") {
       const retrying = retryingRateLimited.current;
@@ -183,12 +231,18 @@ export function App() {
         error: event.message || "翻译失败",
       });
       notify(event.message || "翻译失败");
+      activeTaskId.current = null;
+      translationStarting.current = false;
     }
   });
 
   const notify = (text: string) => {
+    if (toastTimer.current !== null) window.clearTimeout(toastTimer.current);
     setToast(text);
-    window.setTimeout(() => setToast(""), 3200);
+    toastTimer.current = window.setTimeout(() => {
+      setToast("");
+      toastTimer.current = null;
+    }, 3200);
   };
   const loadHistory = () => call<Run[]>("history-list").then(setRuns).catch((error) => notify(errorText(error)));
 
@@ -261,6 +315,8 @@ export function App() {
       void frontendLog("warn", "scan_rejected", "扫描未开始：目录为空");
       return notify("请先选择整合包目录");
     }
+    const generation = ++scanGeneration.current;
+    cmpLoadGeneration.current += 1;
     resetProgress();
     setBusy(true);
     setReport(null);
@@ -270,6 +326,7 @@ export function App() {
     void frontendLog("info", "scan_started", "用户开始扫描任务书", { path });
     try {
       const result = await scanTask({ path, batch_size: settings.batch_size });
+      if (generation !== scanGeneration.current) return;
       setScan(result);
       setSelectedPath(result.quests_dir);
       setStage("scanned");
@@ -280,15 +337,20 @@ export function App() {
         files: result.file_count,
       });
     } catch (error) {
+      if (generation !== scanGeneration.current) return;
       setStage("error");
       notify(errorText(error));
     } finally {
-      setBusy(false);
+      if (generation === scanGeneration.current) setBusy(false);
     }
   }
 
   async function beginTranslation() {
     setConfirm(false);
+    await runTranslation(false);
+  }
+
+  async function runTranslation(recoveryAttempt: boolean) {
     if (!scan) {
       void frontendLog("warn", "translation_rejected", "翻译未开始：没有扫描结果");
       return;
@@ -303,23 +365,81 @@ export function App() {
       provider: settings.provider,
     });
     try {
-      await translateTask(scan.quests_dir, settings);
+      translationStarting.current = true;
+      const accepted = await translateTask(scan.quests_dir, settings);
+      if (translationStarting.current) activeTaskId.current = accepted.task_id;
+      translationStarting.current = false;
     } catch (error) {
       void frontendLog("error", "translation_start_failed", "启动翻译命令失败", {
         error: errorText(error),
       });
       setBusy(false);
       setStage("scanned");
+      activeTaskId.current = null;
+      translationStarting.current = false;
+      if (!recoveryAttempt && errorCode(error) === "task_state_conflict") {
+        try {
+          const inspection = await inspectTaskState(scan.quests_dir);
+          const decision = classifyTaskRecovery(inspection.activities);
+          void frontendLog("warn", "task_conflict_diagnosed", "已诊断任务状态冲突", {
+            decision: decision.kind,
+            task_ids: decision.activities.map((activity) => activity.task_id),
+          });
+          const detail = (activities: ActiveTask[]) =>
+            activities
+              .map(
+                (activity) =>
+                  `• ${activity.task_id} · ${new Date(activity.updated_at).toLocaleString()}`,
+              )
+              .join("\n");
+          if (decision.kind === "writeback_blocked") {
+            window.alert(
+              `检测到未完成的任务书写回：\n${detail(decision.activities)}\n\n为避免二次覆盖，应用不会自动解锁。请先检查任务书、备份目录和诊断日志，再决定是否人工恢复。`,
+            );
+            return;
+          }
+          if (decision.kind === "translation_active") {
+            window.alert(
+              `检测到可能仍在运行的翻译任务：\n${detail(decision.activities)}\n\n这些记录不早于本次应用启动时间，当前不能按中断任务恢复。请确认是否有其他实例仍在工作。`,
+            );
+            return;
+          }
+          if (decision.kind === "unknown") {
+            notify(errorText(error));
+            return;
+          }
+          const confirmed = window.confirm(
+            `检测到 ${decision.activities.length} 个上次进程中断的翻译任务：\n${detail(decision.activities)}\n\n确认当前没有其他 FTB Translator 实例仍在翻译后，是否将它们标记为中断并重新开始？`,
+          );
+          if (!confirmed) return;
+          await recoverInterruptedTranslation(scan.quests_dir);
+          notify("已恢复中断状态，正在重新开始翻译");
+          await runTranslation(true);
+          return;
+        } catch (recoveryError) {
+          void frontendLog("error", "task_recovery_failed", "中断任务诊断或恢复失败", {
+            error: errorText(recoveryError),
+          });
+          notify(errorText(recoveryError));
+          return;
+        }
+      }
       notify(errorText(error));
     }
   }
 
   async function retryRateLimited() {
     if (!scan || !cmpDraft) return;
-    const count = cmpEntries.filter((entry) => entry.status === "rate_limited").length;
+    const count = cmpEntries.filter(
+      (entry) => entry.status === "rate_limited" && entry.target === entry.source,
+    ).length;
     if (!count) return notify("当前没有可重试的限流条目");
     try {
-      await saveCmpTargets(cmpDraft.cmp_path, cmpEntries);
+      if (!cmpDraft.cmp_revision) return notify("CMP 尚未加载完成，请稍后重试");
+      const saved = await saveCmpTargets(cmpDraft.cmp_path, cmpDraft.cmp_revision, cmpEntries);
+      setCmpDraft((current) =>
+        current ? { ...current, cmp_revision: saved.cmp_revision } : current,
+      );
       retryingRateLimited.current = true;
       resetProgress(count);
       setBusy(true);
@@ -330,11 +450,17 @@ export function App() {
         cmp_path: cmpDraft.cmp_path,
         count,
       });
-      await translateTask(scan.quests_dir, settings, cmpDraft.cmp_path);
+      activeTaskId.current = cmpDraft.task_id || null;
+      translationStarting.current = true;
+      const accepted = await translateTask(scan.quests_dir, settings, cmpDraft.cmp_path);
+      if (translationStarting.current) activeTaskId.current = accepted.task_id;
+      translationStarting.current = false;
     } catch (error) {
       retryingRateLimited.current = false;
       setBusy(false);
       setStage("review");
+      activeTaskId.current = null;
+      translationStarting.current = false;
       void frontendLog("error", "rate_limited_retry_failed", "限流条目重试启动失败", {
         task_id: cmpDraft.task_id || "",
         error: errorText(error),
@@ -344,8 +470,10 @@ export function App() {
   }
 
   async function loadCmpEntries(draft: CmpDraft) {
+    const generation = ++cmpLoadGeneration.current;
     try {
       const result = await loadCmp(draft.cmp_path);
+      if (generation !== cmpLoadGeneration.current) return false;
       setCmpEntries(result.entries);
       setCmpDraft((current) =>
         current && current.cmp_path === draft.cmp_path
@@ -354,6 +482,7 @@ export function App() {
               task_id: result.task_id,
               task_state: result.task_state,
               can_apply: result.can_apply,
+              cmp_revision: result.cmp_revision,
             }
           : current,
       );
@@ -361,13 +490,19 @@ export function App() {
         setLogs((value) => [...value, note("该 CMP 已经应用，后端将阻止重复写回。")]);
         notify("该 CMP 已经应用，不能再次写回");
       }
+      return true;
     } catch (error) {
+      if (generation !== cmpLoadGeneration.current) return false;
       notify(errorText(error));
+      return false;
     }
   }
 
   async function applyCmp() {
     if (!scan || !cmpDraft) return;
+    if (!cmpDraft.cmp_revision || !cmpEntries.length) {
+      return notify("CMP 尚未加载完成，请稍后重试");
+    }
     if (cmpDraft.can_apply === false) {
       return notify(
         cmpDraft.task_state === "applied" ? "该 CMP 已经应用，不能再次写回" : "当前任务状态不允许应用 CMP",
@@ -383,12 +518,18 @@ export function App() {
       entries: cmpEntries.length,
     });
     try {
-      if (cmpEntries.length) {
-        await saveCmpTargets(cmpDraft.cmp_path, cmpEntries);
-      }
+      const saved = await saveCmpTargets(
+        cmpDraft.cmp_path,
+        cmpDraft.cmp_revision,
+        cmpEntries,
+      );
+      setCmpDraft((current) =>
+        current ? { ...current, cmp_revision: saved.cmp_revision } : current,
+      );
       const request = {
         cmp_path: cmpDraft.cmp_path,
         quests_dir: scan.quests_dir,
+        cmp_revision: saved.cmp_revision,
       };
       const validation = await validateCmp(request);
       if (validation.blocking) {
@@ -404,13 +545,21 @@ export function App() {
       setProgress(100);
       setStage("done");
       setReport(result.report);
-      setLogs((value) => [...value, note("校对表格已通过校验，翻译结果已写入任务书。")]);
+      setLogs((value) => [
+        ...value,
+        note("校对表格已通过校验，翻译结果已写入任务书。"),
+        ...result.post_commit_warnings.map(note),
+      ]);
       void frontendLog("info", "cmp_applied", "CMP 已应用", {
         task_id: result.task_id,
         run_id: result.run_id,
         cmp_path: cmpDraft.cmp_path,
       });
-      notify("任务书汉化完成");
+      notify(
+        result.post_commit_warnings.length
+          ? "任务书已写入，但有附属数据保存告警"
+          : "任务书汉化完成",
+      );
       loadHistory();
     } catch (error) {
       void frontendLog("warn", "cmp_apply_failed", "CMP 校验或应用失败", {
@@ -426,6 +575,7 @@ export function App() {
 
   async function validateCurrentCmp() {
     if (!scan || !cmpDraft) return;
+    if (!cmpDraft.cmp_revision) return notify("CMP 尚未加载完成，请稍后重试");
     setCmpValidation(null);
     setValidatingCmp(true);
     void frontendLog("info", "cmp_dry_run_started", "用户开始仅验证 CMP", {
@@ -435,7 +585,11 @@ export function App() {
     });
     try {
       const validation = await validateCmp(
-        { cmp_path: cmpDraft.cmp_path, quests_dir: scan.quests_dir },
+        {
+          cmp_path: cmpDraft.cmp_path,
+          quests_dir: scan.quests_dir,
+          cmp_revision: cmpDraft.cmp_revision,
+        },
         cmpEntries,
       );
       setCmpValidation(validation);
@@ -515,6 +669,7 @@ export function App() {
           task_id: undefined,
           task_state: undefined,
           can_apply: undefined,
+          cmp_revision: undefined,
         }
       : {
           cmp_path: value,
@@ -523,10 +678,11 @@ export function App() {
           failed_count: 0,
         };
     setCmpDraft(draft);
+    setCmpEntries([]);
     setCmpValidation(null);
     setStage("review");
     setReviewPrompt(false);
-    await loadCmpEntries(draft);
+    if (!(await loadCmpEntries(draft))) return;
     void frontendLog("info", "cmp_selected", "用户选择了 CMP 校对文件", { cmp_path: value });
     notify("已打开 CMP 校对表格");
   }

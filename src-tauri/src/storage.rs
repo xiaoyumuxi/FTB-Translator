@@ -251,7 +251,7 @@ pub fn save_settings(dir: &Path, v: &Value) -> Result<Value, String> {
     // Validate every non-sensitive field before changing the system credential.
     // Otherwise a rejected settings form can still replace or delete a working key.
     let config = serde_json::to_vec_pretty(&c).map_err(|e| e.to_string())?;
-    fs::write(dir.join("settings.json"), config).map_err(|e| e.to_string())?;
+    crate::atomic_file::write(&dir.join("settings.json"), config).map_err(|e| e.to_string())?;
     crate::logging::set_level(log_level)?;
     if v["api_key_changed"].as_bool().unwrap_or(false) {
         let key = v["api_key"].as_str().unwrap_or("").trim();
@@ -368,7 +368,9 @@ impl History {
         let c = self.conn()?;
         let mut q=c.prepare("SELECT id,pack_name,quests_dir,mode,model,style,total_entries,translated_entries,cache_hits,failed_count,warning_count,created_at FROM translation_runs ORDER BY created_at DESC,id DESC LIMIT 100").map_err(|e|e.to_string())?;
         let rows=q.query_map([],|r|Ok(json!({"id":r.get::<_,i64>(0)?,"pack_name":r.get::<_,String>(1)?,"quests_dir":r.get::<_,String>(2)?,"mode":r.get::<_,String>(3)?,"model":r.get::<_,String>(4)?,"style":r.get::<_,String>(5)?,"total_entries":r.get::<_,i64>(6)?,"translated_entries":r.get::<_,i64>(7)?,"cache_hits":r.get::<_,i64>(8)?,"failed_count":r.get::<_,i64>(9)?,"warning_count":r.get::<_,i64>(10)?,"created_at":r.get::<_,String>(11)?}))).map_err(|e|e.to_string())?;
-        let rows = rows.filter_map(Result::ok).collect::<Vec<_>>();
+        let rows = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
         crate::logging::debug(
             "history",
             "history_listed",

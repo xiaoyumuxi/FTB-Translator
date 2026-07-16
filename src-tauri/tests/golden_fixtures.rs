@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+#[path = "../src/atomic_file.rs"]
+mod atomic_file;
 #[path = "../src/chapters.rs"]
 mod chapters;
 #[path = "../src/cmp.rs"]

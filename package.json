@@ -1,7 +1,7 @@
 {
   "name": "ftb-translator-desktop",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.2.2",
   "type": "module",
   "engines": {
     "node": ">=24"
@@ -9,6 +9,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "check:versions": "node scripts/check-versions.mjs",
+    "test:frontend": "node --test --experimental-strip-types tests/frontend/*.test.ts tests/frontend/*.test.mjs",
     "tauri": "tauri"
   },
   "dependencies": {

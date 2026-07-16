@@ -9,12 +9,13 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     path::{Path, PathBuf},
-    sync::{Mutex, MutexGuard, OnceLock},
+    sync::{LazyLock, Mutex, MutexGuard, OnceLock},
 };
 
 const DATABASE_FILENAME: &str = "task-state.sqlite3";
 
 static STATE_TRANSITION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static PROCESS_STARTED_AT: LazyLock<chrono::DateTime<Utc>> = LazyLock::new(Utc::now);
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -72,6 +73,14 @@ pub struct TaskStatus {
     pub can_apply: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ActiveTask {
+    pub task_id: String,
+    pub state: TaskState,
+    pub updated_at: String,
+    pub recoverable: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct TaskStateStore {
     database_path: PathBuf,
@@ -79,6 +88,7 @@ pub struct TaskStateStore {
 
 impl TaskStateStore {
     pub fn new(data_dir: &Path) -> AppResult<Self> {
+        let _ = &*PROCESS_STARTED_AT;
         std::fs::create_dir_all(data_dir).map_err(|error| {
             state_storage_error(format!(
                 "create application data directory {}: {error}",
@@ -242,6 +252,118 @@ impl TaskStateStore {
                 TaskState::ReviewReady
             },
         )
+    }
+
+    pub fn recover_interrupted_translation(&self, quests_dir: &Path) -> AppResult<usize> {
+        self.recover_interrupted_translation_before(quests_dir, &PROCESS_STARTED_AT)
+    }
+
+    pub fn active_operations(&self, quests_dir: &Path) -> AppResult<Vec<ActiveTask>> {
+        let quests_dir = normalize_existing_path(quests_dir)?;
+        let _guard = transition_lock()?;
+        let connection = self.connection()?;
+        let mut query = connection
+            .prepare(
+                "SELECT task_id,state,updated_at FROM task_states
+                 WHERE quests_dir=? AND state IN ('translating','applying')
+                 ORDER BY updated_at,task_id",
+            )
+            .map_err(sql_error)?;
+        let rows = query
+            .query_map(params![quests_dir], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(sql_error)?;
+        let activities = rows
+            .map(|row| {
+                let (task_id, state, updated_at) = row.map_err(sql_error)?;
+                let state = TaskState::parse(&state)?;
+                let timestamp = chrono::DateTime::parse_from_rfc3339(&updated_at)
+                    .map_err(|error| {
+                        state_storage_error(format!("invalid task timestamp: {error}"))
+                    })?
+                    .with_timezone(&Utc);
+                Ok(ActiveTask {
+                    task_id,
+                    state,
+                    updated_at,
+                    recoverable: state == TaskState::Translating && timestamp < *PROCESS_STARTED_AT,
+                })
+            })
+            .collect::<AppResult<Vec<_>>>()?;
+        logging::debug(
+            "task_state",
+            "active_operations_inspected",
+            "已检查任务书的活动任务状态",
+            serde_json::json!({
+                "quests_dir":quests_dir,
+                "activities":activities.iter().map(|activity| serde_json::json!({
+                    "task_id":activity.task_id,
+                    "state":activity.state.as_str(),
+                    "recoverable":activity.recoverable
+                })).collect::<Vec<_>>()
+            }),
+        );
+        Ok(activities)
+    }
+
+    fn recover_interrupted_translation_before(
+        &self,
+        quests_dir: &Path,
+        cutoff: &chrono::DateTime<Utc>,
+    ) -> AppResult<usize> {
+        let quests_dir = normalize_existing_path(quests_dir)?;
+        let _guard = transition_lock()?;
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction().map_err(sql_error)?;
+        let candidates = {
+            let mut query = transaction
+                .prepare(
+                    "SELECT identity,updated_at FROM task_states
+                     WHERE quests_dir=? AND state='translating'",
+                )
+                .map_err(sql_error)?;
+            let rows = query
+                .query_map(params![quests_dir], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(sql_error)?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(sql_error)?
+        };
+        let mut recovered = Vec::new();
+        for (identity, updated_at) in candidates {
+            let updated_at = chrono::DateTime::parse_from_rfc3339(&updated_at)
+                .map_err(|error| state_storage_error(format!("invalid task timestamp: {error}")))?
+                .with_timezone(&Utc);
+            if updated_at >= *cutoff {
+                continue;
+            }
+            set_state(
+                &transaction,
+                &identity,
+                TaskState::Translating,
+                TaskState::Failed,
+            )?;
+            recovered.push(identity);
+        }
+        transaction.commit().map_err(sql_error)?;
+        if recovered.is_empty() {
+            return Err(AppError::task_state_conflict(
+                "没有可恢复的中断翻译任务；当前任务可能仍在运行",
+                format!("no translating task older than process start for {quests_dir}"),
+            ));
+        }
+        logging::warn(
+            "task_state",
+            "interrupted_translations_recovered",
+            "用户确认将上次进程中断的翻译任务标记为失败",
+            serde_json::json!({"quests_dir":quests_dir,"count":recovered.len()}),
+        );
+        Ok(recovered.len())
     }
 
     fn transition(&self, identity: &str, from: TaskState, to: TaskState) -> AppResult<()> {
@@ -464,8 +586,13 @@ fn reject_busy_task_book(
         .optional()
         .map_err(sql_error)?;
     if let Some((identity, state)) = busy {
+        let user_message = if state == TaskState::Applying.as_str() {
+            "当前任务书存在未完成的写回状态。为避免重复覆盖，应用不会自动解锁；请先检查任务书、备份和诊断日志"
+        } else {
+            "当前任务书已有翻译任务正在执行，或上次翻译异常中断；请先检查任务状态"
+        };
         return Err(AppError::task_state_conflict(
-            "当前任务书已有翻译或写回任务正在执行，请等待完成后再试",
+            user_message,
             format!("busy identity={identity} state={state} quests_dir={quests_dir}"),
         ));
     }
@@ -578,6 +705,64 @@ mod tests {
             .unwrap();
         assert_eq!(status.state, TaskState::ReviewReady);
         assert!(status.can_apply);
+    }
+
+    #[test]
+    fn explicit_recovery_marks_only_an_older_translation_as_failed() {
+        let directory = tempdir().unwrap();
+        let quests = directory.path().join("quests");
+        std::fs::create_dir_all(&quests).unwrap();
+        let store = TaskStateStore::new(&directory.path().join("data")).unwrap();
+        store
+            .reserve_new_translation(&quests, "interrupted-task")
+            .unwrap();
+
+        let cutoff = Utc::now() + chrono::Duration::seconds(1);
+        assert_eq!(
+            store
+                .recover_interrupted_translation_before(&quests, &cutoff)
+                .unwrap(),
+            1
+        );
+        store
+            .reserve_new_translation(&quests, "replacement-task")
+            .unwrap();
+    }
+
+    #[test]
+    fn active_operations_distinguish_recoverable_translation_from_writeback() {
+        let directory = tempdir().unwrap();
+        let quests = directory.path().join("quests");
+        std::fs::create_dir_all(&quests).unwrap();
+        let store = TaskStateStore::new(&directory.path().join("data")).unwrap();
+        let interrupted = store
+            .reserve_new_translation(&quests, "interrupted-task")
+            .unwrap();
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE task_states SET updated_at=? WHERE identity=?",
+                params![
+                    (*PROCESS_STARTED_AT - chrono::Duration::minutes(1)).to_rfc3339(),
+                    interrupted.id
+                ],
+            )
+            .unwrap();
+
+        let active = store.active_operations(&quests).unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].state, TaskState::Translating);
+        assert!(active[0].recoverable);
+        store.recover_interrupted_translation(&quests).unwrap();
+
+        let cmp = document(&quests, "writeback-task", "你好");
+        store.begin_apply(&cmp).unwrap();
+        let active = store.active_operations(&quests).unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].task_id, "writeback-task");
+        assert_eq!(active[0].state, TaskState::Applying);
+        assert!(!active[0].recoverable);
     }
 
     #[test]

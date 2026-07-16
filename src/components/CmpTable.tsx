@@ -1,6 +1,12 @@
 import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
 import { CircleAlert, Download, FileCheck2, FileText, ShieldCheck, Upload } from "lucide-react";
+import {
+  analyzeCmpEntries,
+  type CmpQaFlag,
+} from "../lib/cmpQa";
 import type { CmpDraft, CmpEntry, CmpValidationReport } from "../models/cmp";
+
+type QualityFilter = "all" | "flagged" | CmpQaFlag;
 
 export function CmpTable({
   draft,
@@ -27,22 +33,34 @@ export function CmpTable({
 }) {
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState("all");
+  const [quality, setQuality] = useState<QualityFilter>("all");
   const [page, setPage] = useState(0);
   const pageSize = 60;
+  const qa = useMemo(() => analyzeCmpEntries(entries), [entries]);
   const filtered = useMemo(
     () =>
-      entries.filter(
-        (entry) =>
+      entries.filter((entry) => {
+        const flags = qa.flags_by_index.get(entry.index);
+        const qualityMatches =
+          quality === "all" ||
+          (quality === "flagged" ? Boolean(flags?.size) : Boolean(flags?.has(quality)));
+        return (
           (status === "all" || entry.status === status) &&
+          qualityMatches &&
           `${entry.file} ${entry.entry_id} ${entry.source} ${entry.target}`
             .toLowerCase()
-            .includes(query.toLowerCase()),
-      ),
-    [entries, query, status],
+            .includes(query.toLowerCase())
+        );
+      }),
+    [entries, qa, query, quality, status],
   );
   const rows = filtered.slice(page * pageSize, page * pageSize + pageSize);
   const pages = Math.max(1, Math.ceil(filtered.length / pageSize));
-  useEffect(() => setPage(0), [query, status]);
+  useEffect(() => setPage(0), [query, quality, status]);
+  useEffect(() => setPage(0), [draft.cmp_path]);
+  useEffect(() => {
+    if (page >= pages) setPage(pages - 1);
+  }, [page, pages]);
 
   function update(index: number, target: string) {
     setEntries((items) => items.map((item) => (item.index === index ? { ...item, target } : item)));
@@ -62,6 +80,23 @@ export function CmpTable({
               : "原文保留";
   }
 
+  function qaLabel(flag: CmpQaFlag) {
+    return flag === "review_status"
+      ? "状态需确认"
+      : flag === "unchanged"
+        ? "与原文相同"
+        : flag === "likely_untranslated"
+          ? "疑似未汉化"
+          : "同源多译";
+  }
+
+  const qaMarks: { flag: CmpQaFlag; label: string; hint: string }[] = [
+    { flag: "review_status", label: "状态需确认", hint: "接口失败、格式保护或人工审校状态" },
+    { flag: "inconsistent", label: "同源多译", hint: "相同英文出现了不同中文" },
+    { flag: "unchanged", label: "保持英文", hint: "可能是专名，也可能尚未翻译" },
+    { flag: "likely_untranslated", label: "疑似未汉化", hint: "译文仍为拉丁文字且没有中文" },
+  ];
+
   return (
     <section className="review-table card">
       <header className="review-table-header">
@@ -75,6 +110,45 @@ export function CmpTable({
           <span>条译文</span>
         </div>
       </header>
+      <section className="cmp-qa-ledger" aria-label="CMP 审校线索">
+        <div className="cmp-qa-heading">
+          <CircleAlert />
+          <div>
+            <strong>审校线索</strong>
+            <span>启发式提示，不影响后端格式校验与写回权限</span>
+          </div>
+        </div>
+        <div className="cmp-qa-marks">
+          {qaMarks.map((mark) => (
+            <button
+              key={mark.flag}
+              className={quality === mark.flag ? "active" : ""}
+              title={mark.hint}
+              onClick={() => setQuality((value) => (value === mark.flag ? "all" : mark.flag))}
+            >
+              <strong>{qa.counts[mark.flag]}</strong>
+              <span>{mark.label}</span>
+            </button>
+          ))}
+        </div>
+        {qa.inconsistent_groups.length > 0 && (
+          <div className="cmp-qa-examples">
+            {qa.inconsistent_groups.slice(0, 3).map((group) => (
+              <button
+                key={`${group.source}-${group.entry_indexes.join("-")}`}
+                title={`${group.source}\n${group.targets.join(" / ")}`}
+                onClick={() => {
+                  setQuality("inconsistent");
+                  setQuery(group.source);
+                }}
+              >
+                <span>{group.source}</span>
+                <small>{group.targets.join(" / ")}</small>
+              </button>
+            ))}
+          </div>
+        )}
+      </section>
       <div className="review-table-toolbar">
         <input
           value={query}
@@ -91,6 +165,20 @@ export function CmpTable({
             <option value="format_guard">格式需检查</option>
             <option value="review">需检查</option>
             <option value="unchanged">原文保留</option>
+          </select>
+        </label>
+        <label className="status-filter">
+          <span>线索</span>
+          <select
+            value={quality}
+            onChange={(event) => setQuality(event.target.value as QualityFilter)}
+          >
+            <option value="all">全部线索</option>
+            <option value="flagged">仅看有线索</option>
+            <option value="review_status">状态需确认</option>
+            <option value="inconsistent">同源多译</option>
+            <option value="unchanged">保持英文</option>
+            <option value="likely_untranslated">疑似未汉化</option>
           </select>
         </label>
         <span>{filtered.length} 条匹配</span>
@@ -166,6 +254,11 @@ export function CmpTable({
                   <span className={entry.status === "translated" ? "status-ok" : "status-review"}>
                     {label(entry.status)}
                   </span>
+                  <div className="cmp-qa-tags">
+                    {[...(qa.flags_by_index.get(entry.index) ?? [])]
+                      .filter((flag) => flag !== "review_status")
+                      .map((flag) => <small key={flag}>{qaLabel(flag)}</small>)}
+                  </div>
                 </td>
               </tr>
             ))}

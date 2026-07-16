@@ -1,3 +1,4 @@
+mod atomic_file;
 mod chapters;
 mod cmp;
 mod commands;
@@ -256,6 +257,24 @@ fn apply_cmp(
     commands::apply_cmp(&dir, request)
 }
 
+#[tauri::command]
+fn recover_translation(
+    app: tauri::AppHandle,
+    request: commands::RecoverTranslationRequest,
+) -> Result<commands::RecoverTranslationResponse, AppError> {
+    let dir = data_dir(&app).map_err(commands::invalid_input)?;
+    commands::recover_translation(&dir, request)
+}
+
+#[tauri::command]
+fn inspect_task_state(
+    app: tauri::AppHandle,
+    request: commands::InspectTaskStateRequest,
+) -> Result<commands::InspectTaskStateResponse, AppError> {
+    let dir = data_dir(&app).map_err(commands::invalid_input)?;
+    commands::inspect_task_state(&dir, request)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -267,7 +286,9 @@ pub fn run() {
             load_cmp,
             save_cmp_targets,
             validate_cmp,
-            apply_cmp
+            apply_cmp,
+            recover_translation,
+            inspect_task_state
         ])
         .setup(|app| {
             let dir = data_dir(app.handle()).map_err(std::io::Error::other)?;
