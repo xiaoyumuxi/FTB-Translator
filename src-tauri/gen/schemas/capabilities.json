@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"Default desktop permissions","local":true,"windows":["main"],"permissions":["core:default","dialog:default","dialog:allow-open","dialog:allow-save"]}}
+{"default":{"identifier":"default","description":"Minimum permissions required by the main translation workbench","local":true,"windows":["main"],"permissions":["core:event:allow-listen","core:event:allow-unlisten","dialog:allow-open","dialog:allow-save"]}}

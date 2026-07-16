@@ -17,15 +17,15 @@
 
 - [x] `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check`
 - [x] `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings`
-- [x] `cargo test --manifest-path src-tauri/Cargo.toml`：主 crate 85 passed / 1 ignored；Golden 集成 87 passed / 1 ignored；0 failed。
+- [x] `cargo test --manifest-path src-tauri/Cargo.toml`：主 crate 93 passed / 1 ignored；Golden 集成 96 passed / 1 ignored；0 failed。
 - [x] `npm ci`
 - [x] `npm run build`
 - [ ] `npm run tauri -- build`：release binary 与 `.app` 成功，当前 Codex 桌面环境的 Finder/DMG 美化步骤两次退出；沙箱外重跑结果相同，不能记作普通命令无条件通过。
-- [x] `./node_modules/.bin/tauri build --ci -vv` 诊断重跑成功；随后精确执行 `CI=true npm run tauri -- build` 也成功生成 `.app` 与最终非 `rw.*` 的 `FTB Translater_0.2.0_aarch64.dmg`。
+- [ ] 更名后重新执行 `CI=true npm run tauri -- build`，确认生成 `.app` 与最终非 `rw.*` 的 `FTB Translator_0.2.0_aarch64.dmg`。更名前曾用相同命令成功生成旧名称候选产物，但不能作为本次更名后的打包证据。
 - [x] `git diff --check`（文档与候选修改后通过；提交前再复核一次）。
-- [x] 检查 `src-tauri/target/release/bundle/`：本机产物为 arm64 Mach-O `.app` 与 6,388,014 字节 DMG；最终 DMG SHA-256 为 `bf6dc535db9fd6bbd1e0a94038e8520bfc0f81d2ce1c4b62d1c13894dbb13a65`，`hdiutil verify` 返回 checksum VALID。构建产物被忽略，自动生成 capability schema 已恢复。
+- [ ] 重新检查更名后的 `src-tauri/target/release/bundle/`、Mach-O 架构、DMG 大小、SHA-256 与 `hdiutil verify`；更名前记录的旧产物散列不再作为当前候选证据。
 
-本机 `.app` 的 `CFBundleShortVersionString`/`CFBundleVersion` 均为 `0.2.0`，identifier 为 `com.openres.ftb-translater`。当前仅有 ad-hoc/linker 签名，没有 Developer ID 与公证，因此只能作为未签名候选产物，不能跳过第 6 节。
+更名前的本机 `.app` 使用旧拼写 identifier；当前配置已改为 `com.openres.ftb-translator`，需要通过上面的重新打包项核验。发布候选仍只有 ad-hoc/linker 签名，没有 Developer ID 与公证，因此不能跳过第 6 节。
 
 ## 3. 离线场景与证据映射
 
@@ -35,6 +35,8 @@
 |---|---|
 | `lang` 扫描、Mock 响应、CMP、dry-run、备份与完整输出 | `application::golden_tests::lang_pipeline_matches_golden_files_offline` |
 | 多 `chapters` 扫描、嵌套/富文本/转义、CMP 与完整输出 | `application::golden_tests::chapters_pipeline_matches_golden_files_offline` |
+| Token 占位符恢复、完整着色片段移动、CMP、备份与写回 | `application::golden_tests::token_protection_provider_round_trip_applies_safe_colour_segment_move` |
+| 相同颜色 token 但作用域错误时在备份前拒绝 | `application::golden_tests::token_protection_invalid_colour_scope_is_rejected_before_backup` |
 | 应用内编辑只接受 `index + target` | `commands::tests::cmp_target_edit_accepts_only_index_and_target`、`core::tests::typed_cmp_target_edits_preserve_identity_and_cannot_bypass_validation` |
 | 外部编辑箭头右侧后重新导入 | `cmp::tests::editing_only_the_right_hand_json_string_is_readable` |
 | 修改左侧英文时拒绝且零写入 | `core::tests::cmp_with_modified_english_never_writes_output` |

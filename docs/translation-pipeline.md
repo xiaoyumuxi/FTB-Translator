@@ -37,7 +37,7 @@
 
 API 模式可在格式保护之后执行本地词表最长优先匹配，生成 `⟨G_N⟩`；网页模式强制关闭词表。词表是本地保护层，不是提供商官方 glossary。
 
-这里的正则只识别字符串内部的不可翻译 token，不负责解析整个 SNBT 文件。颜色码的当前校验边界见 [ADR-002](decisions/002-colour-ast.md)。
+这里的正则只识别字符串内部的不可翻译 token，不负责解析整个 SNBT 文件。颜色码还会经过轻量样式 AST 校验，设计边界见 [ADR-002](decisions/002-colour-ast.md)。
 
 ## 4. 缓存和执行计划
 
@@ -60,6 +60,7 @@ API 模式可在格式保护之后执行本地词表最长优先匹配，生成 
 
 - 实际换行、回车、制表符数量；
 - 重新提取并排序后的受保护 token 多重集合；
+- Minecraft 颜色/样式码形成的活动样式 span 多重集合，以及译文新增的无效重置或悬空样式码；
 - JSON 富文本的键、类型和非展示字段结构。
 
 有告警的完整条目回退英文，只有无告警且发生变化的译文进入缓存。
@@ -68,9 +69,9 @@ API 模式可在格式保护之后执行本地词表最长优先匹配，生成 
 
 API 阶段写入：
 
-- `.ftb-translater/translation-units-latest.jsonl`：本次实际请求单元的诊断结果；
-- `.ftb-translater/cache.json`：已通过条目级格式守卫的缓存；
-- `.ftb-translater/reviews/translation-<时间>.cmp`：人工校对文件。
+- `.ftb-translator/translation-units-latest.jsonl`：本次实际请求单元的诊断结果；
+- `.ftb-translator/cache.json`：已通过条目级格式守卫的缓存；
+- `.ftb-translator/reviews/translation-<时间>.cmp`：人工校对文件。
 
 CMP 元数据包含任务目录、模式、源指纹、提供商、接口、模型、翻译要求、词表指纹、条目数和缓存命中数，不包含凭证。每条记录保存源文件、条目 ID、JSON Pointer、状态、英文和译文。生成成功以 `review_ready` 结束；此时没有备份，也没有任务书写回。
 

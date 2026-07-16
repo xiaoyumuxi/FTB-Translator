@@ -117,7 +117,7 @@ export function SettingsPage({
   async function exportLogs() {
     const target = await save({
       title: "导出诊断日志",
-      defaultPath: "ftb-translater-logs.zip",
+      defaultPath: "ftb-translator-logs.zip",
       filters: [{ name: "ZIP 压缩包", extensions: ["zip"] }],
     });
     if (!target) return;

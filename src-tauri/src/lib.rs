@@ -14,12 +14,75 @@ mod task_state;
 
 use error::AppError;
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
 use storage::History;
 use tauri::{Emitter, Manager};
 
+const APP_IDENTIFIER: &str = "com.openres.ftb-translator";
+const LEGACY_APP_IDENTIFIER: &str = "com.openres.ftb-translater";
+
 fn data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     app.path().app_data_dir().map_err(|e| e.to_string())
+}
+
+fn migrate_legacy_data_dir(current: &std::path::Path) -> Result<(), String> {
+    if current.file_name().and_then(|name| name.to_str()) != Some(APP_IDENTIFIER) {
+        return Ok(());
+    }
+    let current_was_empty = if current.exists() {
+        let is_empty = current
+            .read_dir()
+            .map(|mut entries| entries.next().is_none())
+            .unwrap_or(false);
+        if !is_empty {
+            return Ok(());
+        }
+        true
+    } else {
+        false
+    };
+    let Some(parent) = current.parent() else {
+        return Ok(());
+    };
+    let legacy = parent.join(LEGACY_APP_IDENTIFIER);
+    if !legacy.is_dir() {
+        return Ok(());
+    }
+
+    let rewritten_settings = fs::read_to_string(legacy.join("settings.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|mut settings| {
+            let glossary_path = settings.get("glossary_path")?.as_str()?;
+            let relative = std::path::Path::new(glossary_path)
+                .strip_prefix(&legacy)
+                .ok()?;
+            settings["glossary_path"] = json!(current.join(relative).display().to_string());
+            serde_json::to_vec_pretty(&settings).ok()
+        });
+
+    if current_was_empty {
+        fs::remove_dir(current).map_err(|error| format!("无法准备新版应用数据目录：{error}"))?;
+    }
+    if let Err(error) = fs::rename(&legacy, current) {
+        if current_was_empty {
+            let _ = fs::create_dir(current);
+        }
+        return Err(format!(
+            "无法迁移旧版应用数据目录 {}：{error}",
+            legacy.display()
+        ));
+    }
+    if let Some(settings) = rewritten_settings {
+        if let Err(error) = fs::write(current.join("settings.json"), settings) {
+            let _ = fs::rename(current, &legacy);
+            if current_was_empty {
+                let _ = fs::create_dir(current);
+            }
+            return Err(format!("无法更新迁移后的设置文件：{error}"));
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -208,6 +271,7 @@ pub fn run() {
         ])
         .setup(|app| {
             let dir = data_dir(app.handle()).map_err(std::io::Error::other)?;
+            migrate_legacy_data_dir(&dir).map_err(std::io::Error::other)?;
             let settings = storage::load_settings(&dir);
             match logging::init(&settings.log_level) {
                 Ok(_) => {
@@ -231,10 +295,48 @@ pub fn run() {
                 Err(error) => eprintln!("{error}"),
             }
             if let Some(w) = app.get_webview_window("main") {
-                let _ = w.set_title("FTB Translater — 任务书汉化");
+                let _ = w.set_title("FTB Translator — 任务书汉化");
             }
             Ok(())
         })
         .run(tauri::generate_context!())
-        .expect("error while running FTB Translater")
+        .expect("error while running FTB Translator")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migrates_data_from_the_previous_bundle_identifier() {
+        let root = tempfile::tempdir().unwrap();
+        let legacy = root.path().join(LEGACY_APP_IDENTIFIER);
+        let current = root.path().join(APP_IDENTIFIER);
+        fs::create_dir_all(&legacy).unwrap();
+        fs::create_dir(&current).unwrap();
+        let old_glossary = legacy.join("minecraft_glossary.json");
+        fs::write(&old_glossary, "{}").unwrap();
+        fs::write(
+            legacy.join("settings.json"),
+            serde_json::to_vec_pretty(&json!({
+                "glossary_path": old_glossary.display().to_string()
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        migrate_legacy_data_dir(&current).unwrap();
+
+        assert!(!legacy.exists());
+        assert!(current.join("minecraft_glossary.json").is_file());
+        let settings: Value =
+            serde_json::from_slice(&fs::read(current.join("settings.json")).unwrap()).unwrap();
+        assert_eq!(
+            settings["glossary_path"],
+            current
+                .join("minecraft_glossary.json")
+                .display()
+                .to_string()
+        );
+    }
 }

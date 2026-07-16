@@ -591,7 +591,7 @@ export function App() {
         <div className="brand">
           <QuestMark />
           <div>
-            <strong>FTB Translater</strong>
+            <strong>FTB Translator</strong>
             <span>任务书汉化工作台</span>
           </div>
         </div>

@@ -158,7 +158,7 @@ pub(crate) fn backup_with_options(
     m: &str,
     options: &WritebackOptions,
 ) -> AppResult<PathBuf> {
-    let parent = q.join(".ftb-translater/backups");
+    let parent = q.join(".ftb-translator/backups");
     let parent_result = if options.fail_backup_parent() {
         Err(injected_error("backup parent create"))
     } else {
@@ -245,7 +245,7 @@ fn sibling_path(target: &Path, kind: &str) -> PathBuf {
     let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let name = target.file_name().unwrap_or_default().to_string_lossy();
     target.with_file_name(format!(
-        ".{name}.ftb-translater-{kind}-{}-{sequence}",
+        ".{name}.ftb-translator-{kind}-{}-{sequence}",
         std::process::id()
     ))
 }
@@ -1193,7 +1193,7 @@ pub(crate) fn apply_cmp_inner_with_options(
             0
         }
     };
-    let report_path = q.join(".ftb-translater/report-latest.json");
+    let report_path = q.join(".ftb-translator/report-latest.json");
     let report_result = if options.fail_report() {
         Err("test fault injected at report save".to_string())
     } else {

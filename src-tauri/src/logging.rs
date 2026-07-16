@@ -484,7 +484,7 @@ mod tests {
     #[test]
     fn stores_logs_next_to_the_macos_app_bundle() {
         let executable =
-            Path::new("/Applications/FTB Translater.app/Contents/MacOS/ftb-translater");
+            Path::new("/Applications/FTB Translator.app/Contents/MacOS/ftb-translator");
         assert_eq!(
             application_directory(executable).unwrap(),
             Path::new("/Applications")

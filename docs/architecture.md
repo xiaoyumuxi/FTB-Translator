@@ -4,7 +4,7 @@
 
 ## 系统边界
 
-FTB Translater 是 Rust + Tauri 2 后端与 React + TypeScript 前端组成的桌面应用，运行时没有 Python sidecar。
+FTB Translator 是 Rust + Tauri 2 后端与 React + TypeScript 前端组成的桌面应用，运行时没有 Python sidecar。
 
 ```text
 React 界面（src/{App,components,services,types}.tsx/ts）
@@ -52,7 +52,7 @@ React 界面（src/{App,components,services,types}.tsx/ts）
 
 系统应用数据目录保存普通设置、可编辑默认词表、`history.sqlite3` 和 `task-state.sqlite3`。任务状态库只保存任务身份、规范化任务书路径和状态；SQLite 事务与进程内互斥共同保护转换，重启后仍能拒绝再次应用已完成 CMP。API Key 按提供商保存在系统凭证管理器，只在用户明确查看/修改或 API 模式实际翻译时读取，并在会话中缓存。
 
-每个任务书自己的工作数据位于 `<quests>/.ftb-translater/`：
+每个任务书自己的工作数据位于 `<quests>/.ftb-translator/`：
 
 - `cache.json`：通过格式守卫的条目缓存；
 - `translation-units-latest.jsonl`：最近一次实际接口调用的诊断记录；

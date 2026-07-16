@@ -35,7 +35,7 @@ mod application {
         use std::{
             collections::{BTreeMap, HashMap},
             fs,
-            path::Path,
+            path::{Path, PathBuf},
         };
         use tempfile::tempdir;
 
@@ -259,7 +259,7 @@ mod application {
             for (path, content) in source_before_validation {
                 assert_eq!(fs::read(path).unwrap(), content);
             }
-            assert!(!quests.join(".ftb-translater").exists());
+            assert!(!quests.join(".ftb-translator").exists());
             assert!(!quests.join("lang/zh_cn.snbt").exists());
             let result = apply_cmp(
                 &directory.path().join("app-data"),
@@ -287,7 +287,7 @@ mod application {
                     );
                 }
             }
-            assert!(quests.join(".ftb-translater/backups").is_dir());
+            assert!(quests.join(".ftb-translator/backups").is_dir());
         }
 
         #[test]
@@ -298,6 +298,140 @@ mod application {
         #[test]
         fn chapters_pipeline_matches_golden_files_offline() {
             assert_golden_case("chapters-nested", "chapters");
+        }
+
+        fn prepare_single_lang_entry(root: &Path, source: &str) -> (PathBuf, Entry, Item) {
+            let quests = root.join("config/ftbquests/quests");
+            fs::create_dir_all(quests.join("lang")).unwrap();
+            fs::write(
+                quests.join("lang/en_us.snbt"),
+                snbt::dump(&vec![(
+                    "styled".into(),
+                    LangValue::Text(source.to_string()),
+                )]),
+            )
+            .unwrap();
+            let quests = quests.canonicalize().unwrap();
+            let (entry, mut items) = prepare_entry("styled".into(), source.to_string(), 0, None);
+            assert_eq!(items.len(), 1);
+            (quests, entry, items.remove(0))
+        }
+
+        fn write_single_lang_cmp(
+            root: &Path,
+            quests: &Path,
+            entry: &Entry,
+            item: &Item,
+            target: &str,
+        ) -> PathBuf {
+            let document = cmp::Document {
+                meta: cmp::Meta {
+                    version: 1,
+                    task_id: "fixture-token-protection".into(),
+                    quests_dir: quests.display().to_string(),
+                    mode: "lang".into(),
+                    source_fingerprint: source_fingerprint(std::slice::from_ref(entry)),
+                    provider: "fixture_mock".into(),
+                    base_url: "mock://offline".into(),
+                    model: "deterministic-v1".into(),
+                    style: "fixture".into(),
+                    glossary_enabled: false,
+                    glossary_fingerprint: String::new(),
+                    total_entries: 1,
+                    cache_hits: 0,
+                },
+                records: vec![cmp::Record {
+                    file: "lang/en_us.snbt".into(),
+                    entry_id: entry.id.clone(),
+                    path: item.path.clone(),
+                    source: item.source.clone(),
+                    target: target.to_string(),
+                    status: "translated".into(),
+                }],
+            };
+            let path = root.join("token-protection.cmp");
+            cmp::write(&path, &document).unwrap();
+            path
+        }
+
+        #[test]
+        fn token_protection_provider_round_trip_applies_safe_colour_segment_move() {
+            let directory = tempdir().unwrap();
+            let source = "Defeat &cIgnis&r in the &cBurning Arena&r with &dAshes&r";
+            let (quests, entry, item) = prepare_single_lang_entry(directory.path(), source);
+            assert_eq!(
+                item.tokens
+                    .iter()
+                    .map(|(_, original)| original.as_str())
+                    .collect::<Vec<_>>(),
+                ["&c", "&r", "&c", "&r", "&d", "&r"]
+            );
+
+            // Simulate an offline provider response that moves complete styled
+            // segments while preserving every opaque placeholder byte-for-byte.
+            let raw_provider_target = format!(
+                "在{}燃烧竞技场{}中用{}灰烬{}击败{}伊格尼斯{}",
+                item.tokens[2].0,
+                item.tokens[3].0,
+                item.tokens[4].0,
+                item.tokens[5].0,
+                item.tokens[0].0,
+                item.tokens[1].0,
+            );
+            let restored = restore(&raw_provider_target, &item.tokens).unwrap();
+            assert_eq!(restored, "在&c燃烧竞技场&r中用&d灰烬&r击败&c伊格尼斯&r");
+            assert!(warnings(source, &restored).is_empty());
+
+            let rendered = render_entry(
+                &entry,
+                &HashMap::from([(item.id.clone(), restored.clone())]),
+            )
+            .unwrap();
+            assert_eq!(rendered, restored);
+            let cmp_path =
+                write_single_lang_cmp(directory.path(), &quests, &entry, &item, &rendered);
+            let validation =
+                validate_cmp(&json!({"cmp_path":cmp_path,"quests_dir":quests}), &[]).unwrap();
+            assert!(!validation.blocking);
+            assert_eq!(validation.format_guard_failures, 0);
+
+            apply_cmp(
+                &directory.path().join("app-data"),
+                &json!({"cmp_path":cmp_path,"quests_dir":quests}),
+            )
+            .unwrap();
+            assert_eq!(
+                snbt::load(&quests.join("lang/zh_cn.snbt")).unwrap(),
+                vec![("styled".into(), LangValue::Text(restored))]
+            );
+            assert!(quests.join(".ftb-translator/backups").is_dir());
+        }
+
+        #[test]
+        fn token_protection_invalid_colour_scope_is_rejected_before_backup() {
+            let directory = tempdir().unwrap();
+            let source = "&cRed &lBold&r";
+            let (quests, entry, item) = prepare_single_lang_entry(directory.path(), source);
+            let cmp_path =
+                write_single_lang_cmp(directory.path(), &quests, &entry, &item, "&l加粗 &c红色&r");
+
+            let validation =
+                validate_cmp(&json!({"cmp_path":cmp_path,"quests_dir":quests}), &[]).unwrap();
+            assert!(validation.blocking);
+            assert_eq!(validation.format_guard_failures, 1);
+            assert!(validation
+                .blocking_issues
+                .iter()
+                .any(|issue| issue.contains("颜色/样式码的生效作用域发生变化")));
+
+            let error = apply_cmp(
+                &directory.path().join("app-data"),
+                &json!({"cmp_path":cmp_path,"quests_dir":quests}),
+            )
+            .unwrap_err();
+            assert!(error.contains("格式守卫"));
+            assert!(!quests.join("lang/zh_cn.snbt").exists());
+            assert!(!quests.join(".ftb-translator/backups").exists());
         }
 
         #[test]
@@ -340,7 +474,7 @@ mod application {
             for (path, content) in before {
                 assert_eq!(fs::read(path).unwrap(), content);
             }
-            assert!(!quests.join(".ftb-translater/backups").exists());
+            assert!(!quests.join(".ftb-translator/backups").exists());
         }
 
         #[test]

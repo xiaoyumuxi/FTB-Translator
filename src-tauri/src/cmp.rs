@@ -2,7 +2,8 @@ use crate::error::{AppError, AppResult};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, fs, path::Path};
 
-const HEADER: &str = "# FTB Translater CMP v1";
+const HEADER: &str = "# FTB Translator CMP v1";
+const LEGACY_HEADER: &str = "# FTB Translater CMP v1";
 
 fn invalid(message: impl Into<String>) -> AppError {
     let message = message.into();
@@ -163,7 +164,8 @@ pub fn load(path: &Path) -> AppResult<Document> {
 pub fn parse(content: &str) -> AppResult<Document> {
     let mut lines = content.lines().enumerate().peekable();
     let (_, header) = lines.next().ok_or_else(|| invalid("CMP 文件为空"))?;
-    if header.trim_start_matches('\u{feff}') != HEADER {
+    let header = header.trim_start_matches('\u{feff}');
+    if header != HEADER && header != LEGACY_HEADER {
         return Err(invalid("CMP 文件头无效或版本不受支持"));
     }
     let mut meta = None;
@@ -344,6 +346,15 @@ mod tests {
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.contains(r#""Open -> guide\nnow" -> "立即打开指南""#));
         assert_eq!(load(&path).unwrap(), expected);
+    }
+
+    #[test]
+    fn reads_cmp_files_written_before_the_project_rename() {
+        let meta = serde_json::to_string(&document().meta).unwrap();
+        let content = format!(
+            "{LEGACY_HEADER}\n# meta {meta}\n@ {{\"file\":\"lang/en_us.snbt\",\"entry_id\":\"quest.example\",\"path\":\"/text\",\"status\":\"translated\"}}\n\"Open -> guide\\nnow\" -> \"立即打开指南\"\n"
+        );
+        assert_eq!(parse(&content).unwrap(), document());
     }
 
     #[test]

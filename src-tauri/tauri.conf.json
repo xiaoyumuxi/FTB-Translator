@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "FTB Translater",
+  "productName": "FTB Translator",
   "version": "0.2.0",
-  "identifier": "com.openres.ftb-translater",
+  "identifier": "com.openres.ftb-translator",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "FTB Translater",
+        "title": "FTB Translator",
         "width": 1240,
         "height": 820,
         "minWidth": 940,

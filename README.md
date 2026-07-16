@@ -1,4 +1,4 @@
-# FTB Translater
+# FTB Translator
 
 用于汉化现代 FTB Quests 任务文本的桌面工具，基于 Rust + Tauri 构建，支持 OpenAI 兼容接口、DeepL 官方 API，以及无需 API Key 的 Google/DeepL 网页翻译。固定翻译方向：`en_us → zh_cn`。
 
@@ -76,7 +76,7 @@ npm run tauri -- build
 
 如果条目是 Minecraft JSON 富文本组件，程序不会把整个 JSON 交给翻译接口。它会先解析组件树，只抽取玩家可见的根字符串、`text`、`extra`、`with`、`separator`，以及 `hoverEvent` 中可显示的文本；`translate`、`keybind`、`clickEvent`、颜色、样式、命令、URL 和资源 ID 保持原值。每个抽取结果会形成一条带原条目 ID 和 JSON Pointer 回填路径的翻译单元，API 只翻译其中的纯文本，随后程序按路径写回原组件并再次比较结构。包含重复键或无法安全解析的疑似 JSON 组件会保留原文，不会交给翻译接口重新生成。
 
-API 阶段完成后，程序在任务书目录的 `.ftb-translater/reviews/` 中生成玩家可见、可导出的 `.cmp` 校对文件。每个单元包含不可修改的 `@` 回填位置，以及一行 JSON 转义后的 `"英文" -> "中文"`。JSON 字符串转义让换行、引号和文本中原有的箭头不会破坏格式；人工校对只修改箭头右侧。应用 CMP 时会再次核对原任务书内容和每个回填位置，文件缺条目、重复位置、英文被修改或格式标签变化都会拒绝写入。
+API 阶段完成后，程序在任务书目录的 `.ftb-translator/reviews/` 中生成玩家可见、可导出的 `.cmp` 校对文件。每个单元包含不可修改的 `@` 回填位置，以及一行 JSON 转义后的 `"英文" -> "中文"`。JSON 字符串转义让换行、引号和文本中原有的箭头不会破坏格式；人工校对只修改箭头右侧。应用 CMP 时会再次核对原任务书内容和每个回填位置，文件缺条目、重复位置、英文被修改或格式标签变化都会拒绝写入。
 
 校对表格可以按状态筛选。接口限流会单独标记为 `rate_limited`，可用“重试限流项”仅重新请求这一批；重试前会再次校验 CMP 与当前任务书的一致性，成功后更新同一个 CMP，其他译文和人工编辑保持不变。
 
@@ -86,7 +86,7 @@ API 阶段完成后，程序在任务书目录的 `.ftb-translater/reviews/` 中
 "Open guide" -> "打开指南"
 ```
 
-`.ftb-translater/translation-units-latest.jsonl` 仍作为最近一次实际接口调用的内部诊断记录；正常人工校对和导出使用 `.cmp`。
+`.ftb-translator/translation-units-latest.jsonl` 仍作为最近一次实际接口调用的内部诊断记录；正常人工校对和导出使用 `.cmp`。从旧版本升级时，应用会迁移旧 bundle 标识下的设置、历史和默认词表，并按需迁移钥匙串凭证；更名前生成的 `.ftb-translater` 缓存和旧 CMP 文件仍可读取，新版只向 `.ftb-translator` 写入新数据。
 
 CMP v1 的完整字段、解析规则、状态含义和兼容性约束见 [`docs/cmp-format.md`](docs/cmp-format.md)。
 
@@ -191,6 +191,7 @@ API 返回后，每条译文经过两步处理：
 **校验**（`core/translation.rs::warnings`）：对恢复后的译文与原文做以下比较：
 - 换行、回车、制表符数量是否一致
 - 保护 token 集合（排序后）是否完全一致——即没有缺失、没有多余
+- Minecraft 颜色/样式码形成的生效作用域是否等价；即使 token 数量相同，样式被后续颜色码重置、重置码提前或样式码悬空也会拒绝
 - 如果原文是 JSON 文本组件，校验除允许回填的展示文本外，所有键、类型和非展示字段是否保持不变
 
 **校验失败**：该条译文**不写入**，原文被保留，条目进入「人工修正」列表。校验通过的译文才写入文件并存入缓存。
@@ -219,7 +220,7 @@ API 返回后，每条译文经过两步处理：
 
 ### 7. 写回与备份
 
-确认应用 CMP 后，先将原始 `lang` 或 `chapters` 目录整体备份到 `.ftb-translater/backups/<时间戳>/`。API 翻译和人工校对阶段不会提前覆盖文件。
+确认应用 CMP 后，先将原始 `lang` 或 `chapters` 目录整体备份到 `.ftb-translator/backups/<时间戳>/`。API 翻译和人工校对阶段不会提前覆盖文件。
 
 - lang 模式：写出 `lang/zh_cn.snbt`，写前再次解析验证格式合法。
 - chapters 模式：按原文件路径就地修改各章节文件中的对应字段。
@@ -245,7 +246,7 @@ API 返回后，每条译文经过两步处理：
 每个任务书的运行数据保存在整合包目录内：
 
 ```
-config/ftbquests/quests/.ftb-translater/
+config/ftbquests/quests/.ftb-translator/
 ├── cache.json               # 翻译缓存（以 SHA-256 为键）
 ├── report-latest.json       # 最近一次运行的完整报告
 ├── translation-units-latest.jsonl # 最近一次接口调用诊断记录

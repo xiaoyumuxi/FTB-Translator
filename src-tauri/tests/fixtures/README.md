@@ -26,3 +26,8 @@ Coverage:
 `invalid_late_record_in_multi_file_cmp_writes_nothing` additionally corrupts a record in
 the second chapter file and verifies that validation rejects the whole CMP before backup
 or writeback.
+
+The `token_protection_*` integration tests simulate an opaque-placeholder provider
+round-trip through CMP validation, backup, and language-file writeback. They also prove
+that a translation containing the same colour tokens with a different active-style scope
+is rejected before either backup or output creation.

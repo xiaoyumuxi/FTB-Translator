@@ -33,7 +33,7 @@
 对应 CMP 的稳定、人工可编辑部分为：
 
 ```text
-# FTB Translater CMP v1
+# FTB Translator CMP v1
 # 只修改箭头右侧的中文；保留 @ 行、英文原文、引号与 JSON 转义。
 # meta {"version":1,"task_id":"baseline-lang","quests_dir":"<sample>/config/ftbquests/quests","mode":"lang","source_fingerprint":"<sha256>","provider":"google_web","base_url":"https://translate.googleapis.com","model":"google-web","style":"自然中文","glossary_enabled":false,"glossary_fingerprint":"","total_entries":1,"cache_hits":0}
 
@@ -103,7 +103,7 @@ title = Text("你好")
 
 ## CMP 和事务保护基线
 
-- CMP 文件头必须是 `# FTB Translater CMP v1`。
+- 新 CMP 文件头必须是 `# FTB Translator CMP v1`；旧拼写文件头仅保留读取兼容。
 - 元数据使用单行 JSON，记录使用 `@` 位置行和 `"source" -> "target"` JSON 字符串行。
 - `->`、换行和 JSON 转义可往返解析；旧 v1 缺少 `task_id` 时仍可读取。
 - 未知状态、重复回填位置、损坏的翻译对会被拒绝。

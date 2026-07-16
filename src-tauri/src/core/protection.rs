@@ -1,13 +1,24 @@
 use super::{glossary, rich_text, Entry, EntryKind, Item};
 use regex::Regex;
-use std::{collections::HashMap, sync::OnceLock};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::OnceLock,
+};
+
+const COLOUR_PATTERN: &str = r"(?i)[&§][0-9a-fk-orz]";
+
+fn colour_pattern() -> &'static Regex {
+    static COLOUR: OnceLock<Regex> = OnceLock::new();
+    COLOUR
+        .get_or_init(|| Regex::new(COLOUR_PATTERN).expect("colour-protection regex must be valid"))
+}
 
 fn patterns() -> &'static [Regex] {
     static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
     PATTERNS
         .get_or_init(|| {
             [
-                r"(?i)[&§][0-9a-fk-orz]",
+                COLOUR_PATTERN,
                 r"%(?:\d+\$)?[-+# 0,(]*\d*(?:\.\d+)?[bcdeEufFgGosxX]",
                 r"<[^<>\n]+>",
                 r"\{\{[^{}\n]+\}\}",
@@ -75,6 +86,123 @@ pub(crate) fn restore(text: &str, tokens: &[(String, String)]) -> Result<String,
         .fold(text.to_string(), |value, (token, original)| {
             value.replace(token, original)
         }))
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum ColourAnomaly {
+    ResetWithoutActiveStyle,
+    StyleWithoutText,
+}
+
+#[derive(Default)]
+struct ColourAst {
+    tokens: Vec<String>,
+    spans: Vec<Vec<String>>,
+    anomalies: Vec<ColourAnomaly>,
+}
+
+fn extract_flat_colour_ast(text: &str) -> ColourAst {
+    let mut ast = ColourAst::default();
+    let mut active = Vec::new();
+    let mut position = 0;
+    let mut style_without_text = false;
+
+    for matched in colour_pattern().find_iter(text) {
+        let chunk = &text[position..matched.start()];
+        if !chunk.is_empty() && !active.is_empty() {
+            ast.spans.push(active.clone());
+        }
+
+        let token = matched.as_str().to_string();
+        let code = token
+            .chars()
+            .nth(1)
+            .expect("a matched colour token always contains a code")
+            .to_ascii_lowercase();
+        ast.tokens.push(token.clone());
+        match code {
+            'r' => {
+                if active.is_empty() {
+                    ast.anomalies.push(ColourAnomaly::ResetWithoutActiveStyle);
+                }
+                active.clear();
+                style_without_text = false;
+            }
+            '0'..='9' | 'a'..='f' | 'z' => {
+                active = vec![token];
+                style_without_text = true;
+            }
+            _ => {
+                if !active.contains(&token) {
+                    active.push(token);
+                }
+                style_without_text = true;
+            }
+        }
+        position = matched.end();
+    }
+
+    let tail = &text[position..];
+    if !tail.is_empty() {
+        if !active.is_empty() {
+            ast.spans.push(active);
+        }
+        style_without_text = false;
+    }
+    if style_without_text {
+        ast.anomalies.push(ColourAnomaly::StyleWithoutText);
+    }
+    ast
+}
+
+fn extract_colour_ast(text: &str) -> ColourAst {
+    let Some(document) = rich_text::Document::parse(text) else {
+        return extract_flat_colour_ast(text);
+    };
+    let mut ast = ColourAst::default();
+    for unit in document.units() {
+        let unit_ast = extract_flat_colour_ast(&unit.source);
+        ast.tokens.extend(unit_ast.tokens);
+        ast.spans.extend(unit_ast.spans);
+        ast.anomalies.extend(unit_ast.anomalies);
+    }
+    ast
+}
+
+fn counts<T: Ord>(values: impl IntoIterator<Item = T>) -> BTreeMap<T, usize> {
+    let mut counts = BTreeMap::new();
+    for value in values {
+        *counts.entry(value).or_default() += 1;
+    }
+    counts
+}
+
+pub(crate) fn colour_style_warnings(source: &str, target: &str) -> Vec<String> {
+    let source = extract_colour_ast(source);
+    let target = extract_colour_ast(target);
+    let source_tokens = counts(source.tokens);
+    let target_tokens = counts(target.tokens);
+
+    // The general token guard reports missing, changed, or additional codes.
+    // The AST comparison is useful only when both sides contain the same codes.
+    if source_tokens.is_empty() || source_tokens != target_tokens {
+        return Vec::new();
+    }
+
+    let mut warnings = Vec::new();
+    if counts(source.spans) != counts(target.spans) {
+        warnings.push("颜色/样式码的生效作用域发生变化".into());
+    }
+
+    let source_anomalies = counts(source.anomalies);
+    let target_anomalies = counts(target.anomalies);
+    let extra_anomalies = target_anomalies.iter().any(|(anomaly, target_count)| {
+        *target_count > source_anomalies.get(anomaly).copied().unwrap_or_default()
+    });
+    if extra_anomalies {
+        warnings.push("译文新增了无生效样式的重置码或末尾悬空样式码".into());
+    }
+    warnings
 }
 
 pub(crate) fn protect_for_translation(

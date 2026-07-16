@@ -24,7 +24,7 @@ fn save_translation_units(
     results: &HashMap<String, String>,
     failure_statuses: &HashMap<String, &'static str>,
 ) -> Result<(), String> {
-    let directory = quests_dir.join(".ftb-translater");
+    let directory = quests_dir.join(".ftb-translator");
     fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
     let mut output = String::new();
     for item in items {
@@ -70,6 +70,7 @@ pub(crate) fn warnings(source: &str, target: &str) -> Vec<String> {
     if sc != tc {
         w.push("格式码、占位符或资源标识不一致".into())
     }
+    w.extend(super::protection::colour_style_warnings(source, target));
     if let Some(src) = rich_text::Document::parse(source) {
         match rich_text::Document::parse(target) {
             Some(tgt) => {
@@ -118,13 +119,17 @@ pub(crate) fn cache_key(source: &str, s: &Settings) -> String {
     hex::encode(h.finalize())
 }
 pub(crate) fn load_cache(q: &Path) -> HashMap<String, String> {
-    fs::read(q.join(".ftb-translater/cache.json"))
-        .ok()
-        .and_then(|x| serde_json::from_slice(&x).ok())
+    [".ftb-translator", ".ftb-translater"]
+        .into_iter()
+        .find_map(|directory| {
+            fs::read(q.join(directory).join("cache.json"))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        })
         .unwrap_or_default()
 }
 pub(crate) fn save_cache(q: &Path, c: &HashMap<String, String>) -> Result<(), String> {
-    let p = q.join(".ftb-translater/cache.json");
+    let p = q.join(".ftb-translator/cache.json");
     fs::create_dir_all(p.parent().unwrap()).map_err(|e| e.to_string())?;
     fs::write(p, serde_json::to_vec_pretty(c).unwrap()).map_err(|e| e.to_string())
 }
@@ -533,7 +538,7 @@ pub async fn translate(app: AppHandle, data_dir: PathBuf, payload: Value) -> Res
         .as_str()
         .map(PathBuf::from)
         .unwrap_or_else(|| {
-            q.join(".ftb-translater/reviews").join(format!(
+            q.join(".ftb-translator/reviews").join(format!(
                 "translation-{}.cmp",
                 Local::now().format("%Y%m%d-%H%M%S")
             ))

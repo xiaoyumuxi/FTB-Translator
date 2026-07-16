@@ -910,7 +910,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ftb-translater"
+name = "ftb-translator"
 version = "0.2.0"
 dependencies = [
  "chrono",

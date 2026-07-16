@@ -1,12 +1,12 @@
 [package]
-name = "ftb-translater"
+name = "ftb-translator"
 version = "0.2.0"
 description = "FTB Quests translation workbench"
-authors = ["FTB Translater contributors"]
+authors = ["FTB Translator contributors"]
 edition = "2021"
 
 [lib]
-name = "ftb_translater_lib"
+name = "ftb_translator_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

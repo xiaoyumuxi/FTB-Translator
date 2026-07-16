@@ -1,3 +1,3 @@
 fn main() {
-    ftb_translater_lib::run();
+    ftb_translator_lib::run();
 }

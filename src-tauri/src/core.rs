@@ -191,6 +191,36 @@ mod tests {
         assert!(!warnings("Use %s and &eGold&r", "使用黄金").is_empty())
     }
     #[test]
+    fn allows_complete_colour_segments_to_move() {
+        let source = "Defeat &cIgnis&r in the &cBurning Arena&r with &dAshes&r";
+        let target = "在&c燃烧竞技场&r中用&d灰烬&r击败&c伊格尼斯&r";
+        assert!(warnings(source, target).is_empty());
+    }
+    #[test]
+    fn rejects_colour_codes_with_the_same_count_but_invalid_scope() {
+        let problems = warnings("Defeat &cIgnis&r", "击败 &r伊格尼斯&c");
+        assert!(problems.iter().any(|problem| problem.contains("颜色/样式")));
+    }
+    #[test]
+    fn rejects_new_reset_anomaly_even_when_colour_spans_match() {
+        let problems = warnings("&cWarning&r", "&r&c警告");
+        assert!(problems
+            .iter()
+            .any(|problem| problem.contains("无生效样式")));
+    }
+    #[test]
+    fn rejects_colour_modifiers_reset_by_a_later_colour() {
+        let problems = warnings("&cRed &lBold&r", "&l加粗 &c红色&r");
+        assert!(problems.iter().any(|problem| problem.contains("颜色/样式")));
+    }
+    #[test]
+    fn checks_colour_scopes_inside_rich_text_display_units() {
+        let source = r#"{"text":"&cRed &lBold&r","clickEvent":{"action":"run_command","value":"/say &cunchanged"}}"#;
+        let target = r#"{"text":"&l加粗 &c红色&r","clickEvent":{"action":"run_command","value":"/say &cunchanged"}}"#;
+        let problems = warnings(source, target);
+        assert!(problems.iter().any(|problem| problem.contains("颜色/样式")));
+    }
+    #[test]
     fn rejects_injected_or_duplicated_opaque_placeholders() {
         let (protected, tokens) = protect("Use minecraft:stone and 16 blocks");
         assert!(restore(&format!("{protected} ⟨P_999⟩"), &tokens).is_err());
@@ -275,6 +305,23 @@ mod tests {
             cache_key("Mekanism", &enabled),
             cache_key("Mekanism", &Settings::default())
         );
+    }
+    #[test]
+    fn reads_the_previous_work_directory_cache_and_writes_only_the_new_name() {
+        let directory = tempdir().unwrap();
+        let legacy = directory.path().join(".ftb-translater/cache.json");
+        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        fs::write(&legacy, r#"{"legacy":"旧缓存"}"#).unwrap();
+
+        assert_eq!(load_cache(directory.path())["legacy"], "旧缓存");
+
+        let current = HashMap::from([("current".to_string(), "新缓存".to_string())]);
+        save_cache(directory.path(), &current).unwrap();
+        assert_eq!(load_cache(directory.path()), current);
+        assert!(directory
+            .path()
+            .join(".ftb-translator/cache.json")
+            .is_file());
     }
     #[test]
     fn rich_text_cache_does_not_reuse_legacy_whole_json_results() {
@@ -376,7 +423,7 @@ mod tests {
                 path.file_name()
                     .unwrap_or_default()
                     .to_string_lossy()
-                    .contains(".ftb-translater-")
+                    .contains(".ftb-translator-")
             })
             .collect()
     }
@@ -495,7 +542,7 @@ mod tests {
         assert!(!report.blocking_issues.is_empty());
         assert_eq!(tree_snapshot(directory.path()), before);
         assert!(!quests.join("lang/zh_cn.snbt").exists());
-        assert!(!quests.join(".ftb-translater").exists());
+        assert!(!quests.join(".ftb-translator").exists());
     }
 
     #[test]
@@ -663,7 +710,7 @@ mod tests {
         )
         .is_err());
         assert!(!quests.join("lang/zh_cn.snbt").exists());
-        assert!(!quests.join(".ftb-translater/backups").exists());
+        assert!(!quests.join(".ftb-translator/backups").exists());
     }
 
     #[test]
@@ -695,7 +742,7 @@ mod tests {
             .contains("运行编号不可用"));
         let translated = snbt::load(&quests.join("lang/zh_cn.snbt")).unwrap();
         assert_eq!(translated[0].1, LangValue::Text("你好".into()));
-        assert!(quests.join(".ftb-translater/report-latest.json").is_file());
+        assert!(quests.join(".ftb-translator/report-latest.json").is_file());
     }
 
     #[test]
@@ -725,7 +772,7 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("报告保存失败"));
-        assert!(!quests.join(".ftb-translater/report-latest.json").exists());
+        assert!(!quests.join(".ftb-translator/report-latest.json").exists());
         let translated = snbt::load(&quests.join("lang/zh_cn.snbt")).unwrap();
         assert_eq!(translated[0].1, LangValue::Text("你好".into()));
         assert_eq!(
@@ -926,7 +973,7 @@ mod tests {
                 fs::read_to_string(quests.join("lang/en_us.snbt")).unwrap(),
                 "{a: \"A\"}"
             );
-            let snapshots = quests.join(".ftb-translater/backups");
+            let snapshots = quests.join(".ftb-translator/backups");
             if snapshots.exists() {
                 assert_eq!(fs::read_dir(snapshots).unwrap().count(), 0);
             }
@@ -1020,7 +1067,7 @@ mod tests {
         assert!(!error.retryable);
         assert!(!error.task_book_modified);
         assert!(!quests.join("lang/zh_cn.snbt").exists());
-        assert!(!quests.join(".ftb-translater/backups").exists());
+        assert!(!quests.join(".ftb-translator/backups").exists());
     }
 
     #[test]

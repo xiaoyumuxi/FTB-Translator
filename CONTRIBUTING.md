@@ -1,6 +1,6 @@
 # 参与贡献
 
-感谢你改进 FTB Translater。提交改动前，请先阅读 `README.md`、`AGENTS.md`，以及与改动相关的 `docs/` 规范；实现行为和文档必须保持一致。
+感谢你改进 FTB Translator。提交改动前，请先阅读 `README.md`、`AGENTS.md`，以及与改动相关的 `docs/` 规范；实现行为和文档必须保持一致。
 
 ## 开发环境
 

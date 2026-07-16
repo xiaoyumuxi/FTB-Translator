@@ -70,16 +70,47 @@ fn default_provider() -> String {
 fn default_log_level() -> String {
     "info".into()
 }
-fn entry(provider: &str) -> Result<keyring::Entry, String> {
-    let account = if provider == crate::providers::OPENAI_COMPATIBLE {
+fn credential_account(provider: &str) -> String {
+    if provider == crate::providers::OPENAI_COMPATIBLE {
         "deepseek_api_key".to_string()
     } else {
         format!(
             "{}_api_key",
             provider.replace(|c: char| !c.is_ascii_alphanumeric() && c != '_', "")
         )
+    }
+}
+
+fn entry_for_service(provider: &str, service: &str) -> Result<keyring::Entry, String> {
+    keyring::Entry::new(service, &credential_account(provider)).map_err(|e| e.to_string())
+}
+
+fn entry(provider: &str) -> Result<keyring::Entry, String> {
+    entry_for_service(provider, "ftb-translator")
+}
+
+fn legacy_entry(provider: &str) -> Result<keyring::Entry, String> {
+    entry_for_service(provider, "ftb-translater")
+}
+
+fn stored_credential(provider: &str) -> Result<Option<String>, String> {
+    let current = entry(provider)?;
+    if let Ok(value) = current.get_password() {
+        if !value.is_empty() {
+            return Ok(Some(value));
+        }
+    }
+    let legacy = legacy_entry(provider)?;
+    let Ok(value) = legacy.get_password() else {
+        return Ok(None);
     };
-    keyring::Entry::new("ftb-translater", &account).map_err(|e| e.to_string())
+    if value.is_empty() {
+        return Ok(None);
+    }
+    // Reading credentials is already restricted to explicit reveal/save/delete actions
+    // and API translation startup. Opportunistically copy the old service entry then.
+    let _ = current.set_password(&value);
+    Ok(Some(value))
 }
 
 fn credential_cache() -> &'static Mutex<HashMap<String, String>> {
@@ -118,9 +149,8 @@ pub fn translation_api_key(provider: &str) -> Result<String, String> {
         "翻译任务按需读取系统凭证",
         json!({"provider":provider}),
     );
-    let value = entry(provider)?
-        .get_password()
-        .map_err(|_| "没有可用的 API Key，请在设置中查看或修改 API Key 后重试".to_string())?;
+    let value = stored_credential(provider)?
+        .ok_or_else(|| "没有可用的 API Key，请在设置中查看或修改 API Key 后重试".to_string())?;
     cache_credential(provider, Some(&value));
     crate::logging::info(
         "credential",
@@ -228,6 +258,9 @@ pub fn save_settings(dir: &Path, v: &Value) -> Result<Value, String> {
         let e = entry(provider)?;
         if key.is_empty() {
             let _ = e.delete_credential();
+            if let Ok(legacy) = legacy_entry(provider) {
+                let _ = legacy.delete_credential();
+            }
             cache_credential(provider, None);
             crate::logging::info(
                 "credential",
@@ -238,6 +271,9 @@ pub fn save_settings(dir: &Path, v: &Value) -> Result<Value, String> {
         } else {
             e.set_password(key)
                 .map_err(|e| format!("无法保存系统凭证：{e}"))?;
+            if let Ok(legacy) = legacy_entry(provider) {
+                let _ = legacy.delete_credential();
+            }
             cache_credential(provider, Some(key));
             crate::logging::info(
                 "credential",
@@ -275,7 +311,7 @@ pub fn provider_credential(provider: &str) -> Result<Value, String> {
             "用户明确请求查看系统凭证",
             json!({"provider":provider}),
         );
-        let value = entry(provider)?.get_password().unwrap_or_default();
+        let value = stored_credential(provider)?.unwrap_or_default();
         cache_credential(provider, Some(&value));
         value
     };

@@ -245,7 +245,7 @@ async fn append_google_chunk(
     task_id: &str,
 ) -> Result<(), String> {
     let markers = (0..chunk.len())
-        .map(|index| format!("⟪FTB_TRANSLATER_BATCH_{index}⟫"))
+        .map(|index| format!("⟪FTB_TRANSLATOR_BATCH_{index}⟫"))
         .collect::<Vec<_>>();
     let combined = chunk
         .iter()
@@ -508,10 +508,10 @@ mod tests {
     #[test]
     fn splits_google_markers_back_into_entries() {
         let markers = vec![
-            "⟪FTB_TRANSLATER_BATCH_0⟫".into(),
-            "⟪FTB_TRANSLATER_BATCH_1⟫".into(),
+            "⟪FTB_TRANSLATOR_BATCH_0⟫".into(),
+            "⟪FTB_TRANSLATOR_BATCH_1⟫".into(),
         ];
-        let text = "⟪FTB_TRANSLATER_BATCH_0⟫制作表格\n⟪FTB_TRANSLATER_BATCH_1⟫击败巨龙";
+        let text = "⟪FTB_TRANSLATOR_BATCH_0⟫制作表格\n⟪FTB_TRANSLATOR_BATCH_1⟫击败巨龙";
         assert_eq!(
             split_marked_translation(text, &markers).unwrap(),
             vec!["制作表格", "击败巨龙"]
