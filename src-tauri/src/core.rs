@@ -136,12 +136,12 @@ pub fn export_cmp(payload: &Value) -> Result<Value, String> {
     review::export_cmp(payload)
 }
 
-pub fn review_cmp_result(payload: &Value) -> AppResult<Value> {
-    review::review_cmp_result(payload)
-}
-
-pub fn save_cmp_targets(path: &str, edits: &[CmpTargetEdit]) -> AppResult<Value> {
-    review::save_cmp_targets(path, edits)
+pub fn save_cmp_targets(
+    path: &str,
+    expected_revision: &str,
+    edits: &[CmpTargetEdit],
+) -> AppResult<Value> {
+    review::save_cmp_targets(path, expected_revision, edits)
 }
 
 pub fn open_cmp(payload: &Value) -> Result<Value, String> {
@@ -155,13 +155,17 @@ pub fn apply_cmp(data_dir: &Path, payload: &Value) -> Result<Value, String> {
 
 pub(crate) use protection::{prepare_entry, protect, render_entry, restore};
 pub(crate) use review::{
-    cmp_records, entry_source_file, source_fingerprint, validate_cmp_identity, validate_cmp_source,
+    cmp_records, current_source_fingerprint, entry_source_file, source_fingerprint_matches,
+    validate_cmp_identity, validate_cmp_source,
 };
 pub(crate) use scan::{mode, parse_auto};
 pub(crate) use translation::{cache_key, load_cache, save_cache, warnings};
 
 #[cfg(test)]
 pub(crate) use protection::protect_for_translation;
+
+#[cfg(test)]
+pub(crate) use review::source_fingerprint;
 
 #[cfg(test)]
 pub(crate) use writeback::{
@@ -276,7 +280,7 @@ mod tests {
         );
     }
     #[test]
-    fn disabled_glossary_keeps_legacy_cache_key() {
+    fn cache_key_isolates_openai_compatible_endpoints() {
         let settings = Settings {
             provider: providers::OPENAI_COMPATIBLE.into(),
             base_url: "https://api.deepseek.com".into(),
@@ -287,7 +291,7 @@ mod tests {
         hash.update(
             json!({
                 "source_text":"Mekanism",
-                "model":"deepseek-chat",
+                "model":"openai_compatible:deepseek-chat:https://api.deepseek.com",
                 "target_locale":"zh_cn",
                 "style":settings.style
             })
@@ -297,6 +301,14 @@ mod tests {
             cache_key("Mekanism", &settings),
             hex::encode(hash.finalize())
         );
+
+        let mut other_endpoint = settings.clone();
+        other_endpoint.base_url = "https://example.com/v1".into();
+        assert_ne!(
+            cache_key("Mekanism", &settings),
+            cache_key("Mekanism", &other_endpoint)
+        );
+        assert!(super::translation::legacy_openai_cache_key("Mekanism", &other_endpoint).is_none());
 
         let mut enabled = settings;
         enabled.glossary_enabled = true;
@@ -353,6 +365,27 @@ mod tests {
         let result = scan(&json!({"path":d.path(),"batch_size":"auto"})).unwrap();
         assert_eq!(result["entry_count"], 1);
         assert_eq!(result["mode"], "lang");
+    }
+
+    #[test]
+    fn source_v2_fingerprint_detects_non_translatable_chapter_changes() {
+        let directory = tempdir().unwrap();
+        let quests = directory.path().join("quests");
+        let chapter = quests.join("chapters/a.snbt");
+        fs::create_dir_all(chapter.parent().unwrap()).unwrap();
+        fs::write(&chapter, r#"{ id: "quest-one", title: "Hello" }"#).unwrap();
+        let segment = chapters::extract(&chapter).unwrap().remove(0);
+        let (entry, _) = prepare_entry(segment.cache_id, segment.source, 0, None);
+        let entries = vec![entry];
+        let fingerprint = current_source_fingerprint(&quests, "chapters", &entries).unwrap();
+
+        fs::write(&chapter, r#"{ id: "quest-two", title: "Hello" }"#).unwrap();
+        let segment = chapters::extract(&chapter).unwrap().remove(0);
+        let (current_entry, _) = prepare_entry(segment.cache_id, segment.source, 0, None);
+        assert!(
+            !source_fingerprint_matches(&fingerprint, &quests, "chapters", &[current_entry])
+                .unwrap()
+        );
     }
 
     fn write_test_cmp(
@@ -679,6 +712,7 @@ mod tests {
 
         save_cmp_targets(
             cmp_path.to_str().unwrap(),
+            &cmp::revision(&cmp_path).unwrap(),
             &[CmpTargetEdit {
                 index: 0,
                 target: "错误地删除颜色码".into(),
@@ -711,6 +745,33 @@ mod tests {
         .is_err());
         assert!(!quests.join("lang/zh_cn.snbt").exists());
         assert!(!quests.join(".ftb-translator/backups").exists());
+    }
+
+    #[test]
+    fn cmp_target_save_rejects_a_stale_file_revision() {
+        let directory = tempdir().unwrap();
+        let quests = directory.path().join("config/ftbquests/quests");
+        fs::create_dir_all(quests.join("lang")).unwrap();
+        fs::write(quests.join("lang/en_us.snbt"), r#"{ title: "Hello" }"#).unwrap();
+        let cmp_path = directory.path().join("review.cmp");
+        write_test_cmp(&cmp_path, &quests, "Hello", "Hello", "你好");
+        let stale_revision = cmp::revision(&cmp_path).unwrap();
+
+        let content = fs::read_to_string(&cmp_path).unwrap();
+        fs::write(&cmp_path, content.replace("你好", "您好")).unwrap();
+        let error = save_cmp_targets(
+            cmp_path.to_str().unwrap(),
+            &stale_revision,
+            &[CmpTargetEdit {
+                index: 0,
+                target: "再次覆盖".into(),
+            }],
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::CmpInvalid);
+        assert!(error.user_message.contains("其他编辑器"));
+        assert!(fs::read_to_string(cmp_path).unwrap().contains("您好"));
     }
 
     #[test]

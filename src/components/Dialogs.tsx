@@ -31,7 +31,7 @@ export function CmpDecisionDialog({
           <button className="secondary" onClick={onReview}>
             否，人工校对
           </button>
-          <button className="primary" onClick={onApply}>
+          <button className="primary" disabled={draft.can_apply === false} onClick={onApply}>
             <Check />是，直接覆盖
           </button>
         </div>

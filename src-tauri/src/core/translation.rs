@@ -1,9 +1,9 @@
 use super::{
-    chapters, cmp, cmp_records, crate_root, fs, glossary, json, logging, mode, parse_auto,
-    prepare_entry, protect, providers, render_entry, restore, rich_text, snbt, source_fingerprint,
-    stream, validate_cmp_identity, validate_cmp_source, AppError, AppResult, BTreeMap, Client,
-    Duration, Emitter, EntryKind, ErrorCode, HashMap, HashSet, Instant, Item, LangValue, Local,
-    Path, PathBuf, Settings, Sha256, StreamExt, Value,
+    chapters, cmp, cmp_records, crate_root, current_source_fingerprint, fs, glossary, json,
+    logging, mode, parse_auto, prepare_entry, protect, providers, render_entry, restore, rich_text,
+    snbt, stream, validate_cmp_identity, validate_cmp_source, AppError, AppResult, BTreeMap,
+    Client, Duration, Emitter, EntryKind, ErrorCode, HashMap, HashSet, Instant, Item, LangValue,
+    Local, Path, PathBuf, Settings, Sha256, StreamExt, Value,
 };
 use serde::Serialize;
 use sha2::Digest;
@@ -42,7 +42,7 @@ fn save_translation_units(
         output.push_str(&serde_json::to_string(&record).map_err(|e| e.to_string())?);
         output.push('\n');
     }
-    fs::write(directory.join("translation-units-latest.jsonl"), output)
+    crate_root::atomic_file::write(&directory.join("translation-units-latest.jsonl"), output)
         .map_err(|e| format!("无法保存翻译中间文件：{e}"))
 }
 
@@ -52,6 +52,15 @@ fn request_failure_status(error: &AppError) -> &'static str {
     } else {
         "request_failed"
     }
+}
+
+fn retry_locations(document: &cmp::Document) -> HashSet<(String, String)> {
+    document
+        .records
+        .iter()
+        .filter(|record| record.status == "rate_limited" && record.target == record.source)
+        .map(|record| (record.entry_id.clone(), record.path.clone()))
+        .collect()
 }
 
 pub(crate) fn warnings(source: &str, target: &str) -> Vec<String> {
@@ -84,17 +93,20 @@ pub(crate) fn warnings(source: &str, target: &str) -> Vec<String> {
     w
 }
 pub(crate) fn cache_key(source: &str, s: &Settings) -> String {
-    let mut h = Sha256::new();
-    let cache_model = if s.provider == providers::OPENAI_COMPATIBLE {
-        s.model.clone()
-    } else {
-        format!(
+    cache_key_with_model(
+        source,
+        s,
+        &format!(
             "{}:{}:{}",
             s.provider,
             s.model,
             s.base_url.trim_end_matches('/')
-        )
-    };
+        ),
+    )
+}
+
+fn cache_key_with_model(source: &str, s: &Settings, cache_model: &str) -> String {
+    let mut h = Sha256::new();
     let cache_data = if s.glossary_enabled {
         let mut value = json!({
             "source_text":source,
@@ -118,6 +130,12 @@ pub(crate) fn cache_key(source: &str, s: &Settings) -> String {
     h.update(cache_data.to_string());
     hex::encode(h.finalize())
 }
+
+pub(crate) fn legacy_openai_cache_key(source: &str, settings: &Settings) -> Option<String> {
+    (settings.provider == providers::OPENAI_COMPATIBLE
+        && settings.base_url.trim_end_matches('/') == "https://api.deepseek.com")
+        .then(|| cache_key_with_model(source, settings, &settings.model))
+}
 pub(crate) fn load_cache(q: &Path) -> HashMap<String, String> {
     [".ftb-translator", ".ftb-translater"]
         .into_iter()
@@ -131,7 +149,8 @@ pub(crate) fn load_cache(q: &Path) -> HashMap<String, String> {
 pub(crate) fn save_cache(q: &Path, c: &HashMap<String, String>) -> Result<(), String> {
     let p = q.join(".ftb-translator/cache.json");
     fs::create_dir_all(p.parent().unwrap()).map_err(|e| e.to_string())?;
-    fs::write(p, serde_json::to_vec_pretty(c).unwrap()).map_err(|e| e.to_string())
+    crate_root::atomic_file::write(&p, serde_json::to_vec_pretty(c).unwrap())
+        .map_err(|e| e.to_string())
 }
 async fn request(
     client: &Client,
@@ -159,14 +178,7 @@ pub async fn translate(app: AppHandle, data_dir: PathBuf, payload: Value) -> Res
         .transpose()?;
     let retry_locations = retry_document
         .as_ref()
-        .map_or_else(HashSet::new, |document| {
-            document
-                .records
-                .iter()
-                .filter(|record| record.status == "rate_limited")
-                .map(|record| (record.entry_id.clone(), record.path.clone()))
-                .collect()
-        });
+        .map_or_else(HashSet::new, retry_locations);
     if payload["retry_cmp_path"].is_string() && retry_locations.is_empty() {
         return Err("CMP 中没有可重试的限流条目".into());
     }
@@ -297,7 +309,13 @@ pub async fn translate(app: AppHandle, data_dir: PathBuf, payload: Value) -> Res
             results.insert(entry.id.clone(), entry.source.clone());
             continue;
         }
-        if let Some(value) = cache.get(&cache_key(&entry.source, &settings)) {
+        let key = cache_key(&entry.source, &settings);
+        let cached = cache.get(&key).cloned().or_else(|| {
+            legacy_openai_cache_key(&entry.source, &settings)
+                .and_then(|legacy| cache.get(&legacy).cloned())
+        });
+        if let Some(value) = cached {
+            cache.insert(key, value.clone());
             results.insert(entry.id.clone(), value.clone());
             hits += 1
         } else {
@@ -538,9 +556,16 @@ pub async fn translate(app: AppHandle, data_dir: PathBuf, payload: Value) -> Res
         .as_str()
         .map(PathBuf::from)
         .unwrap_or_else(|| {
+            let safe_task_id = task_id
+                .chars()
+                .filter(|character| {
+                    character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
+                })
+                .take(48)
+                .collect::<String>();
             q.join(".ftb-translator/reviews").join(format!(
-                "translation-{}.cmp",
-                Local::now().format("%Y%m%d-%H%M%S")
+                "translation-{}-{safe_task_id}.cmp",
+                Local::now().format("%Y%m%d-%H%M%S%.3f")
             ))
         });
     cmp::write(
@@ -551,7 +576,7 @@ pub async fn translate(app: AppHandle, data_dir: PathBuf, payload: Value) -> Res
                 task_id: task_id.clone(),
                 quests_dir: q.display().to_string(),
                 mode: m.into(),
-                source_fingerprint: source_fingerprint(&entries),
+                source_fingerprint: current_source_fingerprint(&q, m, &entries)?,
                 provider: settings.provider.clone(),
                 base_url: settings.base_url.clone(),
                 model: settings.model.clone(),
@@ -600,4 +625,53 @@ pub async fn translate(app: AppHandle, data_dir: PathBuf, payload: Value) -> Res
         }),
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retry_excludes_rate_limited_records_with_manual_targets() {
+        let document = cmp::Document {
+            meta: cmp::Meta {
+                version: 1,
+                task_id: "retry-test".into(),
+                quests_dir: "/tmp/quests".into(),
+                mode: "lang".into(),
+                source_fingerprint: "source".into(),
+                provider: providers::GOOGLE_WEB.into(),
+                base_url: "https://translate.googleapis.com".into(),
+                model: "google-web".into(),
+                style: "自然中文".into(),
+                glossary_enabled: false,
+                glossary_fingerprint: String::new(),
+                total_entries: 2,
+                cache_hits: 0,
+            },
+            records: vec![
+                cmp::Record {
+                    file: "lang/en_us.snbt".into(),
+                    entry_id: "pending".into(),
+                    path: "$".into(),
+                    source: "Pending".into(),
+                    target: "Pending".into(),
+                    status: "rate_limited".into(),
+                },
+                cmp::Record {
+                    file: "lang/en_us.snbt".into(),
+                    entry_id: "manual".into(),
+                    path: "$".into(),
+                    source: "Manual".into(),
+                    target: "人工译文".into(),
+                    status: "rate_limited".into(),
+                },
+            ],
+        };
+
+        assert_eq!(
+            retry_locations(&document),
+            HashSet::from([("pending".into(), "$".into())])
+        );
+    }
 }

@@ -1,6 +1,6 @@
 use super::{
     cache_key, chapters, cmp, entry_source_file, fs, json, load_cache, logging, mode,
-    prepare_entry, render_entry, resolve, save_cache, snbt, source_fingerprint,
+    prepare_entry, render_entry, resolve, save_cache, snbt, source_fingerprint_matches,
     validate_cmp_identity, warnings, AppError, AppResult, BTreeMap, CmpTargetEdit,
     CmpValidationReport, Entry, EntryKind, HashMap, HashSet, History, Item, LangValue, Local, Path,
     PathBuf, Report, Settings, Value, WalkDir,
@@ -452,8 +452,8 @@ pub fn apply_cmp_result(data_dir: &Path, payload: &Value) -> AppResult<Value> {
             .ok_or_else(|| AppError::invalid_input("缺少 CMP 文件路径", "cmp_path is missing"))?,
     );
     let operation_id = logging::task_id();
-    let document = match cmp::load(&cmp_path) {
-        Ok(document) => document,
+    let (document, revision) = match cmp::load_with_revision(&cmp_path) {
+        Ok(value) => value,
         Err(error) => {
             logging::warn(
                 "translation",
@@ -464,6 +464,19 @@ pub fn apply_cmp_result(data_dir: &Path, payload: &Value) -> AppResult<Value> {
             return Err(AppError::cmp_invalid(error.clone(), error));
         }
     };
+    if let Some(expected_revision) = payload["_cmp_revision"]
+        .as_str()
+        .filter(|revision| !revision.is_empty())
+    {
+        if expected_revision != revision {
+            return Err(AppError::cmp_invalid(
+                "CMP 已被其他编辑器修改，请重新打开后再应用",
+                format!(
+                    "CMP revision conflict in apply: expected={expected_revision} actual={revision}"
+                ),
+            ));
+        }
+    }
     let task_id = if let Some(task_id) = payload["_task_id"]
         .as_str()
         .filter(|task_id| !task_id.trim().is_empty())
@@ -632,8 +645,21 @@ pub fn validate_cmp(payload: &Value, edits: &[CmpTargetEdit]) -> AppResult<CmpVa
             .as_str()
             .ok_or_else(|| AppError::invalid_input("缺少 CMP 文件路径", "cmp_path is missing"))?,
     );
-    let mut document =
-        cmp::load(&cmp_path).map_err(|message| AppError::cmp_invalid(message.clone(), message))?;
+    let (mut document, revision) = cmp::load_with_revision(&cmp_path)
+        .map_err(|message| AppError::cmp_invalid(message.clone(), message))?;
+    if let Some(expected_revision) = payload["cmp_revision"]
+        .as_str()
+        .filter(|revision| !revision.is_empty())
+    {
+        if expected_revision != revision {
+            return Err(AppError::cmp_invalid(
+                "CMP 已被其他编辑器修改，请重新打开后再验证",
+                format!(
+                    "CMP revision conflict in validation: expected={expected_revision} actual={revision}"
+                ),
+            ));
+        }
+    }
     apply_dry_run_edits(&mut document, edits)?;
     let selected = Path::new(payload["quests_dir"].as_str().ok_or_else(|| {
         AppError::invalid_input(
@@ -652,7 +678,12 @@ pub fn validate_cmp(payload: &Value, edits: &[CmpTargetEdit]) -> AppResult<CmpVa
     let identity_error = validate_cmp_identity(&document, &q, current_mode).err();
     let belongs_to_current_task_book = identity_error.is_none();
     let source_fingerprint_matches = document.meta.total_entries == source.entries.len()
-        && document.meta.source_fingerprint == source_fingerprint(&source.entries);
+        && source_fingerprint_matches(
+            &document.meta.source_fingerprint,
+            &q,
+            current_mode,
+            &source.entries,
+        )?;
     if !belongs_to_current_task_book || !source_fingerprint_matches {
         let mut issues = Vec::new();
         if let Some(error) = identity_error {
@@ -912,7 +943,7 @@ pub(crate) fn apply_cmp_inner_with_options(
         }
     }
     if document.meta.total_entries != entries.len()
-        || document.meta.source_fingerprint != source_fingerprint(&entries)
+        || !source_fingerprint_matches(&document.meta.source_fingerprint, &q, m, &entries)?
     {
         return Err(AppError::source_changed(
             "任务书内容在 CMP 生成后发生了变化，请重新扫描并翻译",
@@ -1199,7 +1230,9 @@ pub(crate) fn apply_cmp_inner_with_options(
     } else {
         serde_json::to_vec_pretty(&report_value)
             .map_err(|error| error.to_string())
-            .and_then(|bytes| fs::write(&report_path, bytes).map_err(|error| error.to_string()))
+            .and_then(|bytes| {
+                crate::atomic_file::write(&report_path, bytes).map_err(|error| error.to_string())
+            })
     };
     if let Err(error) = report_result {
         logging::warn(

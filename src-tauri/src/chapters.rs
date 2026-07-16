@@ -1,10 +1,8 @@
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
     fs,
     path::{Path, PathBuf},
-    sync::OnceLock,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -46,6 +44,156 @@ fn decode(s: &str) -> String {
         }
     }
     o
+}
+
+#[derive(Debug)]
+struct StringToken {
+    start: usize,
+    end: usize,
+    quote: char,
+    value: String,
+}
+
+fn quoted_token(text: &str, start: usize) -> Result<StringToken, String> {
+    let quote = text[start..]
+        .chars()
+        .next()
+        .filter(|character| matches!(character, '\'' | '"'))
+        .ok_or_else(|| format!("章节 SNBT 在偏移 {start} 处需要引号字符串"))?;
+    let mut position = start + quote.len_utf8();
+    let content_start = position;
+    let mut escaped = false;
+    while position < text.len() {
+        let character = text[position..]
+            .chars()
+            .next()
+            .ok_or_else(|| "章节 SNBT 字符串意外结束".to_string())?;
+        if escaped {
+            escaped = false;
+        } else if character == '\\' {
+            escaped = true;
+        } else if character == quote {
+            return Ok(StringToken {
+                start,
+                end: position + character.len_utf8(),
+                quote,
+                value: decode(&text[content_start..position]),
+            });
+        }
+        position += character.len_utf8();
+    }
+    Err(format!("章节 SNBT 在偏移 {start} 处的字符串没有结束引号"))
+}
+
+fn skip_trivia(text: &str, mut position: usize) -> usize {
+    loop {
+        while position < text.len() {
+            let character = text[position..].chars().next().unwrap();
+            if !character.is_whitespace() {
+                break;
+            }
+            position += character.len_utf8();
+        }
+        if text[position..].starts_with("//") || text[position..].starts_with('#') {
+            position = text[position..]
+                .find('\n')
+                .map_or(text.len(), |offset| position + offset + 1);
+            continue;
+        }
+        return position;
+    }
+}
+
+fn bare_token_end(text: &str, mut position: usize) -> usize {
+    while position < text.len() {
+        let character = text[position..].chars().next().unwrap();
+        if character.is_whitespace()
+            || matches!(character, '{' | '}' | '[' | ']' | '(' | ')' | ':' | ',')
+            || text[position..].starts_with("//")
+            || character == '#'
+        {
+            break;
+        }
+        position += character.len_utf8();
+    }
+    position
+}
+
+fn is_translatable_key(value: &str) -> bool {
+    matches!(
+        value,
+        "title" | "subtitle" | "description" | "text" | "name"
+    )
+}
+
+fn push_segment(path: &Path, key: &str, token: StringToken, output: &mut Vec<Segment>) {
+    if !token
+        .value
+        .chars()
+        .any(|character| character.is_ascii_alphabetic())
+    {
+        return;
+    }
+    let index = output.len();
+    output.push(Segment {
+        path: path.to_path_buf(),
+        key: key.into(),
+        source: token.value,
+        start: token.start,
+        end: token.end,
+        quote: token.quote,
+        index,
+        cache_id: format!(
+            "{}:{index}:{key}",
+            path.file_name().unwrap_or_default().to_string_lossy()
+        ),
+    });
+}
+
+fn collect_list_strings(
+    text: &str,
+    start: usize,
+    path: &Path,
+    key: &str,
+    output: &mut Vec<Segment>,
+) -> Result<usize, String> {
+    let mut stack = vec!['['];
+    let mut position = start + 1;
+    while position < text.len() {
+        position = skip_trivia(text, position);
+        if position >= text.len() {
+            break;
+        }
+        let character = text[position..].chars().next().unwrap();
+        if matches!(character, '\'' | '"') {
+            let token = quoted_token(text, position)?;
+            position = token.end;
+            if stack.as_slice() == ['['] {
+                push_segment(path, key, token, output);
+            }
+            continue;
+        }
+        match character {
+            '[' | '{' | '(' => stack.push(character),
+            ']' | '}' | ')' => {
+                let expected = match character {
+                    ']' => '[',
+                    '}' => '{',
+                    ')' => '(',
+                    _ => unreachable!(),
+                };
+                if stack.pop() != Some(expected) {
+                    return Err(format!("章节 SNBT 的 {character} 没有匹配的起始括号"));
+                }
+                if stack.is_empty() {
+                    return Ok(position + character.len_utf8());
+                }
+            }
+            _ => {}
+        }
+        position += character.len_utf8();
+    }
+    Err("章节 SNBT 的目标字符串列表没有结束括号".into())
 }
 fn quote(s: &str, q: char) -> String {
     format!(
@@ -117,52 +265,63 @@ fn validate_structure(text: &str) -> Result<(), String> {
 }
 
 pub fn extract(path: &Path) -> Result<Vec<Segment>, String> {
-    static FIELD: OnceLock<Regex> = OnceLock::new();
-    static STRINGS: OnceLock<Regex> = OnceLock::new();
     let text = fs::read_to_string(path).map_err(|e| e.to_string())?;
-    let re = FIELD.get_or_init(|| {
-        Regex::new(r#"(?s)(?:\b(title|subtitle|description|text|name)|["'](title|subtitle|description|text|name)["'])\s*:\s*(\[[^\]]*]|"(?:\\.|[^"])*"|'(?:\\.|[^'])*')"#)
-            .expect("chapter-field regex must be valid")
-    });
-    let strings = STRINGS.get_or_init(|| {
-        Regex::new(r#""((?:\\.|[^"])*)"|'((?:\\.|[^'])*)'"#)
-            .expect("chapter-string regex must be valid")
-    });
-    let mut out = vec![];
-    for cap in re.captures_iter(&text) {
-        let match_start = cap.get(0).unwrap().start();
-        let line_start = text[..match_start].rfind('\n').map_or(0, |i| i + 1);
-        let prefix = &text[line_start..match_start];
-        if prefix.trim_start().starts_with('#') || prefix.contains("//") {
-            continue;
+    validate_structure(&text)?;
+    let mut output = Vec::new();
+    let mut position = 0;
+    while position < text.len() {
+        position = skip_trivia(&text, position);
+        if position >= text.len() {
+            break;
         }
-        let key = cap.get(1).or(cap.get(2)).unwrap().as_str();
-        let value = cap.get(3).unwrap();
-        for sc in strings.captures_iter(value.as_str()) {
-            let m = sc.get(0).unwrap();
-            let raw = sc.get(1).or(sc.get(2)).unwrap().as_str();
-            let source = decode(raw);
-            if !source.chars().any(|c| c.is_ascii_alphabetic()) {
+        let character = text[position..].chars().next().unwrap();
+        let (key, token_end) = if matches!(character, '\'' | '"') {
+            let token = quoted_token(&text, position)?;
+            (token.value, token.end)
+        } else if matches!(character, '{' | '}' | '[' | ']' | '(' | ')' | ':' | ',') {
+            position += character.len_utf8();
+            continue;
+        } else {
+            let end = bare_token_end(&text, position);
+            if end == position {
+                position += character.len_utf8();
                 continue;
             }
-            let start = value.start() + m.start();
-            let idx = out.len();
-            out.push(Segment {
-                path: path.to_path_buf(),
-                key: key.into(),
-                source,
-                start,
-                end: value.start() + m.end(),
-                quote: m.as_str().chars().next().unwrap(),
-                index: idx,
-                cache_id: format!(
-                    "{}:{idx}:{key}",
-                    path.file_name().unwrap().to_string_lossy()
-                ),
-            });
+            (text[position..end].to_string(), end)
+        };
+        let colon = skip_trivia(&text, token_end);
+        if !is_translatable_key(&key) || colon >= text.len() || !text[colon..].starts_with(':') {
+            position = token_end;
+            continue;
+        }
+        let value = skip_trivia(&text, colon + 1);
+        if value >= text.len() {
+            return Err(format!("章节字段 {key} 缺少值"));
+        }
+        let value_start = text[value..].chars().next().unwrap();
+        if matches!(value_start, '\'' | '"') {
+            let token = quoted_token(&text, value)?;
+            position = token.end;
+            push_segment(path, &key, token, &mut output);
+        } else if value_start == '[' {
+            collect_list_strings(&text, value, path, &key, &mut output)?;
+            // Keep walking inside the list so rich/nested components such as
+            // `description: [{ text: "..." }]` are found as normal fields.
+            position = value + 1;
+        } else {
+            position = value;
         }
     }
-    Ok(out)
+    output.sort_by_key(|segment| segment.start);
+    for (index, segment) in output.iter_mut().enumerate() {
+        segment.index = index;
+        segment.cache_id = format!(
+            "{}:{index}:{}",
+            path.file_name().unwrap_or_default().to_string_lossy(),
+            segment.key
+        );
+    }
+    Ok(output)
 }
 pub fn render_replacements(
     path: &Path,
@@ -215,6 +374,83 @@ mod tests {
         let (rendered, count) = render_replacements(&p, &[(0, "你好".into())]).unwrap();
         assert_eq!(count, 1);
         assert!(rendered.contains("你好"));
+    }
+
+    #[test]
+    fn token_walker_ignores_field_names_and_comment_markers_inside_strings() {
+        let d = tempdir().unwrap();
+        let p = d.path().join("a.snbt");
+        fs::write(
+            &p,
+            r#"{
+  description: ["Visit https://example.com/a]b", "Line two"], title: "Real title",
+  note: "title: \"Not a field\"",
+  // subtitle: "Commented"
+  "name": 'Quoted key'
+}"#,
+        )
+        .unwrap();
+
+        let segments = extract(&p).unwrap();
+        assert_eq!(
+            segments
+                .iter()
+                .map(|segment| segment.source.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "Visit https://example.com/a]b",
+                "Line two",
+                "Real title",
+                "Quoted key"
+            ]
+        );
+    }
+
+    #[test]
+    fn token_walker_finds_target_fields_in_nested_compounds() {
+        let d = tempdir().unwrap();
+        let p = d.path().join("nested.snbt");
+        fs::write(
+            &p,
+            r#"{ group: { quests: [{ title: "First" }, { subtitle: 'Second' }] } }"#,
+        )
+        .unwrap();
+
+        let segments = extract(&p).unwrap();
+        assert_eq!(
+            segments
+                .iter()
+                .map(|segment| segment.source.as_str())
+                .collect::<Vec<_>>(),
+            ["First", "Second"]
+        );
+    }
+
+    #[test]
+    fn token_walker_finds_rich_text_fields_inside_target_lists_in_source_order() {
+        let d = tempdir().unwrap();
+        let p = d.path().join("rich-list.snbt");
+        fs::write(
+            &p,
+            r#"{ description: [{ text: "Nested first" }, "Direct second"] }"#,
+        )
+        .unwrap();
+
+        let segments = extract(&p).unwrap();
+        assert_eq!(
+            segments
+                .iter()
+                .map(|segment| segment.source.as_str())
+                .collect::<Vec<_>>(),
+            ["Nested first", "Direct second"]
+        );
+        assert_eq!(
+            segments
+                .iter()
+                .map(|segment| segment.index)
+                .collect::<Vec<_>>(),
+            [0, 1]
+        );
     }
 
     #[test]

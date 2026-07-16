@@ -12,6 +12,7 @@ export type CmpDraft = {
   total_entries: number;
   warning_count: number;
   failed_count: number;
+  cmp_revision?: string;
   task_state?: TaskState;
   can_apply?: boolean;
 };

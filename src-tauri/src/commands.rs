@@ -1,7 +1,7 @@
 use crate::core;
 use crate::error::AppError;
 pub use crate::protocol::CmpTargetEdit;
-use crate::task_state::{TaskState, TaskStateStore};
+use crate::task_state::{ActiveTask, TaskState, TaskStateStore};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]
@@ -65,6 +65,7 @@ pub struct LoadCmpResponse {
     pub task_id: String,
     pub task_state: TaskState,
     pub can_apply: bool,
+    pub cmp_revision: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -82,6 +83,7 @@ pub struct CmpEntryResponse {
 #[serde(deny_unknown_fields)]
 pub struct SaveCmpTargetsRequest {
     pub cmp_path: String,
+    pub expected_revision: String,
     pub edits: Vec<CmpTargetEdit>,
 }
 
@@ -89,6 +91,7 @@ pub struct SaveCmpTargetsRequest {
 pub struct SaveCmpTargetsResponse {
     pub saved: bool,
     pub entries: usize,
+    pub cmp_revision: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -96,6 +99,7 @@ pub struct SaveCmpTargetsResponse {
 pub struct CmpScopeRequest {
     pub cmp_path: String,
     pub quests_dir: String,
+    pub cmp_revision: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -103,6 +107,7 @@ pub struct CmpScopeRequest {
 pub struct ValidateCmpRequest {
     pub cmp_path: String,
     pub quests_dir: String,
+    pub cmp_revision: String,
     #[serde(default)]
     pub edits: Vec<CmpTargetEdit>,
 }
@@ -113,6 +118,28 @@ pub struct ApplyCmpResponse {
     pub run_id: i64,
     pub task_id: String,
     pub post_commit_warnings: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoverTranslationRequest {
+    pub quests_dir: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RecoverTranslationResponse {
+    pub recovered: usize,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InspectTaskStateRequest {
+    pub quests_dir: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct InspectTaskStateResponse {
+    pub activities: Vec<ActiveTask>,
 }
 
 pub fn invalid_input(error: impl Into<String>) -> AppError {
@@ -133,28 +160,40 @@ pub fn load_cmp(
     data_dir: &std::path::Path,
     request: LoadCmpRequest,
 ) -> Result<LoadCmpResponse, AppError> {
-    let value = core::review_cmp_result(&serde_json::json!({"cmp_path": &request.cmp_path}))?;
-    let entries = serde_json::from_value(
-        value
-            .get("entries")
-            .cloned()
-            .ok_or_else(|| invalid_input("CMP 响应缺少 entries"))?,
-    )
-    .map_err(|error| invalid_input(error.to_string()))?;
-    let document = crate::cmp::load(std::path::Path::new(&request.cmp_path))?;
+    let (document, cmp_revision) =
+        crate::cmp::load_with_revision(std::path::Path::new(&request.cmp_path))?;
+    let entries = document
+        .records
+        .iter()
+        .enumerate()
+        .map(|(index, record)| CmpEntryResponse {
+            index,
+            entry_id: record.entry_id.clone(),
+            path: record.path.clone(),
+            file: record.file.clone(),
+            source: record.source.clone(),
+            target: record.target.clone(),
+            status: record.status.clone(),
+        })
+        .collect();
     let (_, task_status) = TaskStateStore::new(data_dir)?.register_cmp(&document)?;
     Ok(LoadCmpResponse {
         entries,
         task_id: task_status.task_id,
         task_state: task_status.state,
         can_apply: task_status.can_apply,
+        cmp_revision,
     })
 }
 
 pub fn save_cmp_targets(
     request: SaveCmpTargetsRequest,
 ) -> Result<SaveCmpTargetsResponse, AppError> {
-    let value = core::save_cmp_targets(&request.cmp_path, &request.edits)?;
+    let value = core::save_cmp_targets(
+        &request.cmp_path,
+        &request.expected_revision,
+        &request.edits,
+    )?;
     serde_json::from_value(value).map_err(|error| invalid_input(error.to_string()))
 }
 
@@ -166,6 +205,7 @@ pub fn validate_cmp(
         &serde_json::json!({
             "cmp_path": &request.cmp_path,
             "quests_dir": request.quests_dir,
+            "cmp_revision": request.cmp_revision,
         }),
         &request.edits,
     )?;
@@ -180,7 +220,17 @@ pub fn apply_cmp(
     data_dir: &std::path::Path,
     request: CmpScopeRequest,
 ) -> Result<ApplyCmpResponse, AppError> {
-    let document = crate::cmp::load(std::path::Path::new(&request.cmp_path))?;
+    let (document, revision) =
+        crate::cmp::load_with_revision(std::path::Path::new(&request.cmp_path))?;
+    if revision != request.cmp_revision {
+        return Err(AppError::cmp_invalid(
+            "CMP 已被其他编辑器修改，请重新打开后再应用",
+            format!(
+                "CMP revision conflict before apply: expected={} actual={revision}",
+                request.cmp_revision
+            ),
+        ));
+    }
     let store = TaskStateStore::new(data_dir)?;
     let identity = store.begin_apply(&document)?;
     let value = core::apply_cmp_result(
@@ -189,6 +239,7 @@ pub fn apply_cmp(
             "cmp_path": request.cmp_path,
             "quests_dir": request.quests_dir,
             "_task_id": identity.task_id,
+            "_cmp_revision": revision,
         }),
     );
     match value {
@@ -225,6 +276,25 @@ pub fn apply_cmp(
     }
 }
 
+pub fn recover_translation(
+    data_dir: &std::path::Path,
+    request: RecoverTranslationRequest,
+) -> Result<RecoverTranslationResponse, AppError> {
+    let store = TaskStateStore::new(data_dir)?;
+    let recovered =
+        store.recover_interrupted_translation(std::path::Path::new(&request.quests_dir))?;
+    Ok(RecoverTranslationResponse { recovered })
+}
+
+pub fn inspect_task_state(
+    data_dir: &std::path::Path,
+    request: InspectTaskStateRequest,
+) -> Result<InspectTaskStateResponse, AppError> {
+    let activities = TaskStateStore::new(data_dir)?
+        .active_operations(std::path::Path::new(&request.quests_dir))?;
+    Ok(InspectTaskStateResponse { activities })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,6 +326,7 @@ mod tests {
     fn cmp_requests_reject_unknown_top_level_fields() {
         let error = serde_json::from_value::<SaveCmpTargetsRequest>(json!({
             "cmp_path": "/tmp/review.cmp",
+            "expected_revision": "revision",
             "edits": [],
             "source": "tampered"
         }))
@@ -265,12 +336,14 @@ mod tests {
         let valid = serde_json::from_value::<ValidateCmpRequest>(json!({
             "cmp_path": "/tmp/review.cmp",
             "quests_dir": "/tmp/quests",
+            "cmp_revision": "revision",
             "edits": [{"index": 0, "target": "译文"}]
         }));
         assert!(valid.is_ok());
         let error = serde_json::from_value::<ValidateCmpRequest>(json!({
             "cmp_path": "/tmp/review.cmp",
             "quests_dir": "/tmp/quests",
+            "cmp_revision": "revision",
             "edits": [],
             "source": "tampered"
         }))
@@ -332,6 +405,7 @@ mod tests {
             CmpScopeRequest {
                 cmp_path: cmp_path.display().to_string(),
                 quests_dir: quests.display().to_string(),
+                cmp_revision: cmp::revision(&cmp_path).unwrap(),
             },
         )
         .unwrap();
@@ -345,6 +419,7 @@ mod tests {
             CmpScopeRequest {
                 cmp_path: cmp_path.display().to_string(),
                 quests_dir: quests.display().to_string(),
+                cmp_revision: cmp::revision(&cmp_path).unwrap(),
             },
         )
         .unwrap_err();
@@ -360,5 +435,20 @@ mod tests {
         .unwrap();
         assert_eq!(reimported.task_state, TaskState::Applied);
         assert!(!reimported.can_apply);
+
+        let original = fs::read_to_string(&cmp_path).unwrap();
+        fs::write(
+            &cmp_path,
+            original.replace("command-apply-task", "tampered-apply-task"),
+        )
+        .unwrap();
+        let tampered = load_cmp(
+            &data_dir,
+            LoadCmpRequest {
+                cmp_path: cmp_path.display().to_string(),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(tampered.code, crate::error::ErrorCode::CmpInvalid);
     }
 }

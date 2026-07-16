@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { CmpEntry, CmpValidationReport, TaskState } from "../models/cmp";
 import type { LogLevel, SettingsData } from "../models/settings";
+import type { ActiveTask } from "../models/task";
 import type { Report, ScanResult } from "../models/translation";
 
 export function errorText(error: unknown) {
@@ -14,6 +15,18 @@ export function errorText(error: unknown) {
     return error.user_message;
   }
   return String(error);
+}
+
+export function errorCode(error: unknown) {
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    typeof error.code === "string"
+  ) {
+    return error.code;
+  }
+  return undefined;
 }
 
 export function frontendLog(
@@ -82,18 +95,20 @@ export function loadCmp(cmpPath: string) {
     task_id: string;
     task_state: TaskState;
     can_apply: boolean;
+    cmp_revision: string;
   }>("load_cmp", { cmp_path: cmpPath });
 }
 
-export function saveCmpTargets(cmpPath: string, entries: CmpEntry[]) {
-  return typedCall<{ saved: boolean; entries: number }>("save_cmp_targets", {
+export function saveCmpTargets(cmpPath: string, expectedRevision: string, entries: CmpEntry[]) {
+  return typedCall<{ saved: boolean; entries: number; cmp_revision: string }>("save_cmp_targets", {
     cmp_path: cmpPath,
+    expected_revision: expectedRevision,
     edits: entries.map(({ index, target }) => ({ index, target })),
   });
 }
 
 export function validateCmp(
-  request: { cmp_path: string; quests_dir: string },
+  request: { cmp_path: string; quests_dir: string; cmp_revision: string },
   entries: CmpEntry[] = [],
 ) {
   return typedCall<CmpValidationReport>("validate_cmp", {
@@ -102,6 +117,21 @@ export function validateCmp(
   });
 }
 
-export function applyCmp(request: { cmp_path: string; quests_dir: string }) {
-  return typedCall<{ report: Report; run_id: number; task_id: string }>("apply_cmp", request);
+export function applyCmp(request: { cmp_path: string; quests_dir: string; cmp_revision: string }) {
+  return typedCall<{
+    report: Report;
+    run_id: number;
+    task_id: string;
+    post_commit_warnings: string[];
+  }>("apply_cmp", request);
+}
+
+export function recoverInterruptedTranslation(questsDir: string) {
+  return typedCall<{ recovered: number }>("recover_translation", { quests_dir: questsDir });
+}
+
+export function inspectTaskState(questsDir: string) {
+  return typedCall<{ activities: ActiveTask[] }>("inspect_task_state", {
+    quests_dir: questsDir,
+  });
 }

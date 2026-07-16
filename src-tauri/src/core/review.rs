@@ -1,6 +1,6 @@
 use super::{
-    cmp, json, logging, rich_text, AppError, AppResult, BTreeMap, CmpTargetEdit, Entry, EntryKind,
-    HashMap, HashSet, Item, Path, PathBuf, Sha256, Value,
+    chapters, cmp, fs, json, logging, rich_text, AppError, AppResult, BTreeMap, CmpTargetEdit,
+    Entry, EntryKind, HashMap, HashSet, Item, Path, PathBuf, Sha256, Value,
 };
 use sha2::Digest;
 use std::process::Command;
@@ -14,6 +14,64 @@ pub(crate) fn source_fingerprint(entries: &[Entry]) -> String {
         hash.update([0xff]);
     }
     hex::encode(hash.finalize())
+}
+
+pub(crate) fn current_source_fingerprint(
+    quests_dir: &Path,
+    mode: &str,
+    entries: &[Entry],
+) -> AppResult<String> {
+    let files = if mode == "lang" {
+        vec![quests_dir.join("lang/en_us.snbt")]
+    } else {
+        chapters::files(quests_dir)
+    };
+    let mut hash = Sha256::new();
+    hash.update(b"ftb-translator-source-v2\0");
+    hash.update(if mode == "lang" {
+        b"lang-parser-v1".as_slice()
+    } else {
+        b"chapter-token-walker-v1".as_slice()
+    });
+    hash.update([0]);
+    hash.update(source_fingerprint(entries).as_bytes());
+    for path in files {
+        let relative = path.strip_prefix(quests_dir).map_err(|error| {
+            AppError::source_changed(
+                "无法建立任务书源文件指纹",
+                format!(
+                    "source path {} is outside task book: {error}",
+                    path.display()
+                ),
+            )
+        })?;
+        let bytes = fs::read(&path).map_err(|error| {
+            AppError::source_changed(
+                format!("无法读取任务书源文件 {}：{error}", path.display()),
+                error.to_string(),
+            )
+        })?;
+        let relative = relative.to_string_lossy();
+        hash.update((relative.len() as u64).to_le_bytes());
+        hash.update(relative.as_bytes());
+        hash.update((bytes.len() as u64).to_le_bytes());
+        hash.update(bytes);
+    }
+    Ok(format!("v2:{}", hex::encode(hash.finalize())))
+}
+
+pub(crate) fn source_fingerprint_matches(
+    recorded: &str,
+    quests_dir: &Path,
+    mode: &str,
+    entries: &[Entry],
+) -> AppResult<bool> {
+    if recorded.starts_with("v2:") {
+        Ok(recorded == current_source_fingerprint(quests_dir, mode, entries)?)
+    } else {
+        // CMP v1 files created before source-v2 hashed only extracted IDs and English.
+        Ok(recorded == source_fingerprint(entries))
+    }
 }
 
 pub(crate) fn validate_cmp_identity(
@@ -60,7 +118,12 @@ pub(crate) fn validate_cmp_source(
 ) -> AppResult<()> {
     validate_cmp_identity(document, quests_dir, mode)?;
     if document.meta.total_entries != entries.len()
-        || document.meta.source_fingerprint != source_fingerprint(entries)
+        || !source_fingerprint_matches(
+            &document.meta.source_fingerprint,
+            quests_dir,
+            mode,
+            entries,
+        )?
     {
         return Err(AppError::source_changed(
             "任务书内容在 CMP 生成后发生了变化，请重新扫描并翻译",
@@ -185,29 +248,19 @@ pub fn export_cmp(payload: &Value) -> Result<Value, String> {
     Ok(json!({"path":target}))
 }
 
-pub fn review_cmp_result(payload: &Value) -> AppResult<Value> {
-    let path = Path::new(
-        payload["cmp_path"]
-            .as_str()
-            .ok_or_else(|| AppError::invalid_input("缺少 CMP 文件路径", "cmp_path is missing"))?,
-    );
-    let document = cmp::load(path)?;
-    Ok(json!({
-        "entries": document.records.iter().enumerate().map(|(index, record)| json!({
-            "index": index,
-            "entry_id": record.entry_id,
-            "path": record.path,
-            "file": record.file,
-            "source": record.source,
-            "target": record.target,
-            "status": record.status,
-        })).collect::<Vec<_>>(),
-    }))
-}
-
-pub fn save_cmp_targets(path: &str, edits: &[CmpTargetEdit]) -> AppResult<Value> {
+pub fn save_cmp_targets(
+    path: &str,
+    expected_revision: &str,
+    edits: &[CmpTargetEdit],
+) -> AppResult<Value> {
     let path = Path::new(path);
-    let mut document = cmp::load(path)?;
+    let (mut document, revision) = cmp::load_with_revision(path)?;
+    if revision != expected_revision {
+        return Err(AppError::cmp_invalid(
+            "CMP 已被其他编辑器修改，请重新打开后再保存",
+            format!("CMP revision conflict: expected={expected_revision} actual={revision}"),
+        ));
+    }
     if edits.len() != document.records.len() {
         return Err(AppError::cmp_invalid(
             "CMP 校对表格条目数已变化，请重新打开校对表格",
@@ -232,16 +285,35 @@ pub fn save_cmp_targets(path: &str, edits: &[CmpTargetEdit]) -> AppResult<Value>
             let message = format!("第 {} 条译文不能为空", expected_index + 1);
             return Err(AppError::cmp_invalid(message.clone(), message));
         }
-        document.records[edit.index].target.clone_from(&edit.target);
+        let record = &mut document.records[edit.index];
+        let target_changed = record.target != edit.target;
+        record.target.clone_from(&edit.target);
+        if target_changed
+            && matches!(
+                record.status.as_str(),
+                "rate_limited" | "request_failed" | "format_guard" | "unchanged" | "fallback"
+            )
+            && record.target != record.source
+        {
+            record.status = "review".into();
+        }
+    }
+    let current_revision = cmp::revision(path)?;
+    if current_revision != revision {
+        return Err(AppError::cmp_invalid(
+            "CMP 在保存期间被其他编辑器修改，请重新打开后再试",
+            format!("CMP changed during save: loaded={revision} current={current_revision}"),
+        ));
     }
     cmp::write(path, &document)?;
+    let revision = cmp::revision(path)?;
     logging::info(
         "translation",
         "cmp_edits_saved",
         "CMP 校对表格修改已保存",
         json!({"task_id":document.meta.task_id,"cmp_path":path,"entries":edits.len()}),
     );
-    Ok(json!({"saved":true,"entries":edits.len()}))
+    Ok(json!({"saved":true,"entries":edits.len(),"cmp_revision":revision}))
 }
 
 pub fn open_cmp(payload: &Value) -> Result<Value, String> {

@@ -292,7 +292,10 @@ fn clean_value(value: Value, depth: usize) -> Value {
                     let hidden = is_sensitive_key(&key);
                     let value = if hidden {
                         Value::String("[REDACTED]".into())
-                    } else if key.eq_ignore_ascii_case("error") {
+                    } else if key.eq_ignore_ascii_case("error")
+                        || key.eq_ignore_ascii_case("user_message")
+                        || key.eq_ignore_ascii_case("internal_message")
+                    {
                         match value {
                             Value::String(value) => Value::String(clean_error(&value)),
                             value => clean_value(value, depth + 1),
@@ -445,6 +448,18 @@ mod tests {
             0,
         );
         assert_eq!(value["error"], "HTTP 429 Too Many Requests");
+
+        let nested = clean_value(
+            json!({
+                "error": {
+                    "user_message": "HTTP 401 Unauthorized: echoed response body",
+                    "internal_message": "HTTP 401 Unauthorized: echoed response body"
+                }
+            }),
+            0,
+        );
+        assert_eq!(nested["error"]["user_message"], "HTTP 401 Unauthorized");
+        assert_eq!(nested["error"]["internal_message"], "HTTP 401 Unauthorized");
     }
 
     #[test]
